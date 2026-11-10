@@ -347,6 +347,11 @@
                 continue;
             }
             
+            // GNUstep draws its own decorations, so leave its windows alone.
+            if ([connection windowIsGNUstepClient:winId]) {
+                continue;
+            }
+
             // Check if this is a dock window with struts - scan for struts even if already managed
             if ([ewmhService isWindowTypeDock:win]) {
                 //NSLog(@"[WindowManager] Found dock window %u at startup - checking for struts", winId);
@@ -783,6 +788,13 @@
         }
         case XCB_MAP_REQUEST: {
             xcb_map_request_event_t *mapRequestEvent = (xcb_map_request_event_t *)event;
+
+            // GNUstep draws its own decorations, so leave its windows alone.
+            if ([connection windowIsGNUstepClient:mapRequestEvent->window]) {
+                xcb_map_window([connection connection], mapRequestEvent->window);
+                [connection flush];
+                break;
+            }
 
             // Check if this is a dock window with struts
             EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];

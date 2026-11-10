@@ -297,6 +297,19 @@ static XCBConnection *sharedInstance;
     key = nil;
 }
 
+- (BOOL)windowIsGNUstepClient:(xcb_window_t)aWindow
+{
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
+    xcb_get_property_cookie_t cookie =
+        xcb_get_property(connection, 0, aWindow,
+                         [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService GNUStepWmAttr]],
+                         XCB_GET_PROPERTY_TYPE_ANY, 0, sizeof(uint32_t) * 4);
+    xcb_get_property_reply_t *reply = xcb_get_property_reply(connection, cookie, NULL);
+    BOOL isGNUstep = reply != NULL && xcb_get_property_value_length(reply) > 0;
+    free(reply);
+    return isGNUstep;
+}
+
 - (void)restackDockWindowsAbove
 {
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];

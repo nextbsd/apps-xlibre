@@ -178,4 +178,6 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 - (void)hideSnapPreview;
 - (void)executeSnapForZone:(SnapZone)zone frame:(XCBFrame *)frame;
 
+- (BOOL)windowIsGNUstepClient:(xcb_window_t)aWindow;
+
 @end

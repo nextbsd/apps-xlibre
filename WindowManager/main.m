@@ -73,7 +73,7 @@ int main(int argc, const char * argv[])
         [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"GSSuppressAppIcon"];
 
         // Parse command-line arguments for compositing mode
-        BOOL enableCompositing = YES;
+        BOOL enableCompositing = NO;
         for (int i = 1; i < argc; i++) {
             if (strcmp(argv[i], "-dc") == 0 || strcmp(argv[i], "--disable-compositing") == 0) {
                 enableCompositing = NO;
@@ -85,7 +85,7 @@ int main(int argc, const char * argv[])
                 printf("Options:\n");
                 printf("  -dc, --disable-compositing  Disable XRender compositing\n");
                 printf("  -h, --help          Show this help message\n\n");
-                printf("By default, windows use XRender compositing for transparency effects.\n");
+                printf("Compositing is off by default, and only non-GNUstep X11 windows are managed.\n");
                 printf("Use -dc to force traditional direct rendering mode.\n");
                 return 0;
             }
