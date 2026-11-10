@@ -1,7 +1,6 @@
 PACKAGE_NAME = WindowManager
 
 include $(GNUSTEP_MAKEFILES)/common.make
-WindowManager_INSTALL_DIR = /System/Library/CoreServices/Applications
 WindowManager_PRINCIPAL_CLASS = UROSWMApplication
 
 VERSION = 0.1.0
