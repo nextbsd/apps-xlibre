@@ -422,12 +422,6 @@
                      watcher:self
                      forMode:NSDefaultRunLoopMode];
 
-    // Also add for NSRunLoopCommonModes to ensure events are processed
-    [currentRunLoop addEvent:(void*)(uintptr_t)xcbFD
-                        type:ET_RDESC
-                     watcher:self
-                     forMode:NSRunLoopCommonModes];
-
     // Menu tracking loops run in NSEventTrackingRunLoopMode — process XCB events
     // there too so the WM can handle MapRequest for popup menu windows
     [currentRunLoop addEvent:(void*)(uintptr_t)xcbFD
@@ -2553,10 +2547,6 @@
             [currentRunLoop removeEvent:(void*)(uintptr_t)xcbFD
                                    type:ET_RDESC
                                 forMode:NSDefaultRunLoopMode
-                                   all:YES];
-            [currentRunLoop removeEvent:(void*)(uintptr_t)xcbFD
-                                   type:ET_RDESC
-                                forMode:NSRunLoopCommonModes
                                    all:YES];
             [currentRunLoop removeEvent:(void*)(uintptr_t)xcbFD
                                    type:ET_RDESC
