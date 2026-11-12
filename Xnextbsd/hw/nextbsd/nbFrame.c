@@ -1244,7 +1244,7 @@ nbFrameSendTitle(nbFrame *frame, WindowPtr pWin)
 {
     WindowPtr client = nbFrameClient(pWin);
     PropertyPtr prop = nbProperty(client, "_NET_WM_NAME", 8);
-    char title[WS_MAX_TITLE];
+    char title[256];            /* WindowServer's WS_MAX_TITLE */
     size_t len, i;
 
     if (prop == NULL) {
