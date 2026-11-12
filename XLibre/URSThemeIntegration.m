@@ -10,8 +10,6 @@
 #import "URSThemeIntegration.h"
 #import "URSDecorationMetrics.h"
 #import "URSProfiler.h"
-#import "URSRenderingContext.h"
-#import "URSCompositingManager.h"
 #import "XCBConnection.h"
 #import "XCBFrame.h"
 #import "XCBScreen.h"
@@ -281,16 +279,6 @@ static BOOL pressedButtonHighlighted = NO;
         return NO;
     }
 
-    if ([[URSCompositingManager sharedManager] compositingActive] && [target argbVisualId] == 0) {
-        XCBScreen *screen = [target onScreen] ?: [target screen];
-        xcb_visualid_t argbVisualId = screen ? [self findARGBVisualForScreen:screen] : 0;
-        if (argbVisualId != 0) {
-            [target setUse32BitDepth:YES];
-            [target setArgbVisualId:argbVisualId];
-            [target createPixmap];
-        }
-    }
-
     int width = (int)[bitmap pixelsWide];
     int height = (int)[bitmap pixelsHigh];
     int bytesPerRow = (int)[bitmap bytesPerRow];
@@ -404,9 +392,7 @@ static BOOL pressedButtonHighlighted = NO;
                                top:YES];
 
         success = [self uploadBitmap:bitmap toWindow:titlebar];
-        if (success)
-            [URSRenderingContext notifyRenderingComplete:[frame window]];
-        else
+        if (!success)
             NSLog(@"Failed to upload title bar for: %@", title);
     } @catch (NSException *exception) {
         NSLog(@"Title bar rendering failed: %@", exception.reason);

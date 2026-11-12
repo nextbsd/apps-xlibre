@@ -7,6 +7,7 @@
 //
 
 #import "URSFocusManager.h"
+#import "XCBFrame.h"
 #import "URSProfiler.h"
 #import "XCBScreen.h"
 #import "XCBAttributesReply.h"
@@ -26,8 +27,9 @@
     }
 
     // Ensure AppKit global UI (including menu bar visuals) reflects the
-    // window that was just focused via X11 path.
-    [NSApp activateIgnoringOtherApps:YES];
+    // window that was just focused via X11 path. WindowServer activates
+    // XLibre.app when one of its X windows is clicked; focusing an X
+    // window must not steal activation from another app.
     [NSApp updateWindows];
 
     NSMenu *menu = [NSApp mainMenu];
@@ -441,6 +443,19 @@
     }
 
     return nil;
+}
+
+- (BOOL)isFrameFocused:(XCBFrame *)frame
+{
+    xcb_window_t focused = self.lastFocusedWindowId;
+    XCBWindow *client;
+
+    if (frame == nil || focused == XCB_NONE)
+        return NO;
+    if ([frame window] == focused)
+        return YES;
+    client = [frame childWindowForKey:ClientWindow];
+    return client != nil && [client window] == focused;
 }
 
 @end

@@ -1,0 +1,11 @@
+{
+	ApplicationName = "XLibre";
+	ApplicationDescription = "X11 programs on NextBSD's WindowServer";
+	ApplicationRelease = "0.2.0";
+	CFBundleIdentifier = "org.nextbsd.XLibre";
+	NSIcon = "XLibre.png";
+	Copyright = "Copyright (c) 2020 Alessandro Sangiuliano, (c) 2026 Joseph Maloney";
+	CopyrightDescription = "MIT License. Xnextbsd is built from XLibre (MIT/X11).";
+	Authors = ("Alessandro Sangiuliano", "Joseph Maloney");
+	URL = "https://github.com/nextbsd/apps-xlibre";
+}

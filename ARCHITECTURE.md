@@ -1,18 +1,34 @@
-# WindowManager Architecture
+# XLibre.app Architecture
 
 ## Overview
 
-WindowManager is a standalone X11 window manager built with Objective-C,
-GNUstep, and XCB. All source code lives under `WindowManager/` in a
-unified build target — there is no separate framework or library.
+XLibre.app runs X11 programs on NextBSD's WindowServer, as XQuartz does on
+macOS (plan: the [XLibre-on-WindowServer-Plan](https://github.com/nextbsd/apps-xlibre/wiki/XLibre-on-WindowServer-Plan)
+wiki page). It is a GNUstep app on the `nextbsd` backend that starts
+`Xnextbsd`, the rootless X server in `Xnextbsd/`, and runs the X window
+manager and the clipboard bridge in its own process. It grew out of the
+Gershwin WindowManager.app, which it replaces: the window manager, its
+GSTheme title bars and the XCB layer are that app's, without its
+compositor, window switcher, keyboard grabs, snapping and Gershwin menu.
+
+```
+ WindowServer ── composites ──┬── XLibre.app windows (menus, panels)
+                              └── Xnextbsd windows (one per top-level X window)
+   XLibre.app ── XCB ── Xnextbsd ── X11 ── xterm, ...
+       ├── window manager: reparents X windows, draws NextBSD title bars
+       └── clipboard bridge: CLIPBOARD <-> the general pasteboard (gpbs)
+```
 
 ## Directory Layout
 
 ```
-WindowManager/
-├── main.m                          Application entry point
-├── UROSWMApplication.h/m           Custom NSApplication subclass
-├── GNUmakefile                     Single build target
+XLibre/
+├── main.m                          Entry point, signal handling
+├── XLibreController.h/m            App delegate: menus, launch, Hide, Quit
+├── XLServer.h/m                    The Xnextbsd child: cookie, -displayfd, join
+├── XLPasteboardBridge.h/m          X CLIPBOARD <-> GNUstep pasteboard
+├── XLibre.png, XLibreInfo.plist    Icon and Info.plist
+├── GNUmakefile                     Builds and installs XLibre.app
 │
 ├── xcb/                            XCB abstraction layer
 │   ├── XCBConnection.h/m           X11 connection, event dispatch, window map
@@ -36,14 +52,12 @@ WindowManager/
 │   │   ├── EIcccm.h                ICCCM protocol constants
 │   │   ├── EMousePosition.h        Mouse position on frame edges
 │   │   ├── EResizeDirection.h      Resize direction flags
-│   │   ├── ETitleBarColor.h        Titlebar color state (up/down)
 │   │   └── EXErrorMessages.h       X protocol error strings
 │   │
 │   ├── services/                   X11 protocol services
 │   │   ├── EWMHService.h/m         Extended Window Manager Hints
 │   │   ├── ICCCMService.h/m        Inter-Client Communication Conventions
-│   │   ├── XCBAtomService.h/m      Atom interning and lookup
-│   │   └── TitleBarSettingsService.h/m  Titlebar geometry configuration
+│   │   └── XCBAtomService.h/m      Atom interning and lookup
 │   │
 │   └── utils/                      Utility classes and functions
 │       ├── XCBCreateWindowTypeRequest.h/m  Window creation request builder
@@ -51,86 +65,61 @@ WindowManager/
 │       ├── Comparators.h/m         Color and struct comparison helpers
 │       └── Transformers.h/m        Coordinate and struct transformation helpers
 │
-├── URSHybridEventHandler.h/m       Event coordinator (XCB → manager dispatch)
+├── URSHybridEventHandler.h/m       Window manager: XCB events -> managers
 ├── URSFocusManager.h/m             Focus tracking and window resolution
-├── URSKeyboardManager.h/m          Alt-Tab keyboard grabs and key events
 ├── URSWorkareaManager.h/m          EWMH strut tracking and workarea calculation
 ├── URSTitlebarController.h/m       Titlebar button hit-test, hover, resize
-├── URSSnappingMenuController.h/m   Right-click window snapping menu
-│
-├── URSCompositingManager.h/m       XRender compositing manager
-├── URSRenderingContext.h/m         Per-window rendering state
-│
-├── URSWindowSwitcher.h/m           Alt-Tab window switcher logic
-├── URSWindowSwitcherOverlay.h/m    Window switcher overlay rendering
-├── URSSnapPreviewOverlay.h/m       Snap preview overlay rendering
-├── URSThemeIntegration.h/m         GSTheme titlebar decoration bridge
-└── GSThemeTitleBar.h/m             GSTheme drawing surface adapter
+├── URSDecorationMetrics.h/m        Title bar and button geometry from the theme
+└── URSThemeIntegration.h/m         GSTheme titlebar decoration bridge
 ```
 
-## Layered Architecture
+## How the pieces talk
 
-```
-┌──────────────────────────────────────────────────────────┐
-│                    main.m / UROSWMApplication            │
-│                   (NSApplication run loop)               │
-├──────────────────────────────────────────────────────────┤
-│                  URSHybridEventHandler                   │
-│              (event coordinator / dispatcher)            │
-├────────┬──────────┬───────────┬──────────┬──────────────┤
-│ Focus  │ Keyboard │ Workarea  │ Titlebar │   Snapping   │
-│Manager │ Manager  │ Manager   │Controller│   Menu Ctrl  │
-├────────┴──────────┴───────────┴──────────┴──────────────┤
-│                   Compositing Manager                    │
-│                   (optional XRender)                     │
-├──────────────────────────────────────────────────────────┤
-│                   URSThemeIntegration                    │
-│               (GSTheme ↔ XCB bridge)                    │
-├──────────────────────────────────────────────────────────┤
-│                        xcb/                              │
-│   XCBConnection · XCBWindow · XCBFrame · XCBTitleBar     │
-│   XCBScreen · services/ · utils/ · enums/                │
-├──────────────────────────────────────────────────────────┤
-│                libxcb · libxcb-icccm · GNUstep           │
-└──────────────────────────────────────────────────────────┘
-```
+- **XLibre.app and WindowServer:** the `nextbsd` GNUstep backend. XLibre.app
+  gets its WindowServer client id and token from
+  `-[NextBSDServer windowServerAppCredentials]` (by selector) and hands them
+  to `Xnextbsd` in its environment (`XNEXTBSD_JOIN`), so both connections are
+  one WindowServer app: clicking an X window keeps XLibre's menu, and
+  Command shortcuts typed in an X window reach XLibre's menu.
+- **XLibre.app and Xnextbsd:** X11 over XCB, on two connections: the window
+  manager's and the clipboard bridge's. The window manager's channel to
+  the server is the root window property `_XNEXTBSD_HIDDEN` (1 when XLibre
+  is hidden: Xnextbsd orders every frame out on WindowServer and leaves the
+  X windows mapped). Focus follows WindowServer's key window inside
+  Xnextbsd, and override-redirect windows get the popup level there.
+- **The clipboard bridge and gpbs:** NSPasteboard. The bridge owns
+  CLIPBOARD for the pasteboard's text and copies new X owners' text to it
+  (UTF8_STRING or STRING, TARGETS, INCR).
 
-### Layer Responsibilities
+## Layers
 
-**Application Layer** — `main.m`, `UROSWMApplication`
-Bootstraps GNUstep, parses arguments, installs signal handlers, starts
-`NSApplication` run loop.
+**Application** — `main.m`, `XLibreController`, `XLServer`
+Starts the server with a fresh MIT-MAGIC-COOKIE-1 (xauth), sets `DISPLAY`
+and `XAUTHORITY` for itself and the X programs it starts (not for anything
+else: Terminal gets no `DISPLAY`), builds the menus, opens the
+`XLibreAppToRun` program, and asks before quitting while X programs run.
 
-**Event Coordinator** — `URSHybridEventHandler`
-Bridges the XCB file descriptor into the NSRunLoop. Receives raw XCB events
-and dispatches to the appropriate manager. Does not contain domain logic
-itself — only routing.
+**Window manager** — `URSHybridEventHandler` and the managers
+Bridges the XCB file descriptor into the NSRunLoop, reparents X windows
+into frames and dispatches events to the focus, workarea and title bar
+managers. Each frame is one WindowServer window, so WindowServer
+composites, stacks and moves the title bar with the window.
 
-**Manager Layer** — Five single-responsibility managers
-Each manager owns one concern: focus tracking, keyboard grabs, workarea
-calculation, titlebar interactions, or the snapping context menu.
-
-**Compositing Layer** — `URSCompositingManager`, `URSRenderingContext`
-Optional XRender-based compositor. Activated with `-c` flag. Manages
-off-screen buffers, damage tracking, and animated transitions.
-
-**Theme Layer** — `URSThemeIntegration`, `GSThemeTitleBar`
-Bridges GNUstep's GSTheme drawing API to XCB pixmaps. Renders titlebar
-decorations, buttons, and text using the active GSTheme.
+**Theme Layer** — `URSThemeIntegration`, `URSDecorationMetrics`
+Draws title bars with the active GSTheme into a bitmap that is put into
+the frame's title bar window. Nothing here needs the X11 GNUstep backend.
 
 **XCB Abstraction Layer** — `xcb/`
 Objective-C wrapper around libxcb. Provides object-oriented access to
-X11 windows, screens, cursors, selections, EWMH/ICCCM services, and
-GNUstep/XCB rendering. No window management policy — only mechanism.
+X11 windows, screens, cursors, selections and EWMH/ICCCM services. No
+window management policy, only mechanism.
 
 ## Build
 
 ```sh
-cd WindowManager && make
+gmake                                   # XLibre.app
+gmake install XNEXTBSD=/path/Xnextbsd   # ~/Applications/XLibre.app, server inside
 ```
-
-Single `make` invocation. No framework to build first. All XCB abstraction
-sources compile directly into the application binary.
 
 ## Key Design Decisions
 
