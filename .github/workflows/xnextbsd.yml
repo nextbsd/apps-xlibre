@@ -1,0 +1,112 @@
+name: Build Xnextbsd
+
+# Cross-builds Xnextbsd, the rootless X server on NextBSD's WindowServer
+# (nextbsd/apps-xlibre#2, #3), for amd64 and arm64 on the x86_64 runner,
+# inside the per-arch nextbsd-toolchain container, as nextbsd-xlibre builds
+# Xorg: the pinned XLibre tarball, nextbsd-xlibre's patch series and meson
+# cross files (read only, at the commit Xnextbsd/sources.lock pins), and this
+# repo's patch and hw/nextbsd. build-xnextbsd.sh then checks the binary:
+# what it links (WindowServer and Mach, no DRM, udev or libinput), not
+# set-uid, its compiled-in paths, no build-host paths.
+#
+# The sysroot is compat's `continuous` base with nextbsd-userland's
+# (liblaunch, libsystem_kernel and the Mach headers, which
+# libWindowServerClient needs), nextbsd-displayserver-support's (pixman, the font stack, libxkbcommon, the
+# XKB data, in /usr) and nextbsd-xlibs' (the X client libraries,
+# libxkbfile, the protocol headers, in /usr/X11) `continuous` artifacts on
+# top. libWindowServerClient isn't published as an artifact, so
+# build-xnextbsd.sh builds it into the sysroot from apps-windowserver at
+# the pinned commit.
+#
+# The binary is uploaded as a workflow artifact (Xnextbsd-<arch>.tar.gz);
+# nothing is published or dispatched. The window manager has its own
+# workflow (build.yml).
+
+on:
+  push:
+    branches: [master]
+    paths: ['Xnextbsd/**', '.github/workflows/xnextbsd.yml']
+  pull_request:
+    paths: ['Xnextbsd/**', '.github/workflows/xnextbsd.yml']
+  workflow_dispatch:
+    inputs:
+      fbsd_sha:
+        description: 'Pinned FreeBSD SHA for the toolchain image tag (blank = latest)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    name: Xnextbsd (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, target_arch: amd64 }
+          - { arch: arm64, target_arch: aarch64 }
+    container:
+      # The pinned llvmorg-19.1.7 clang, lld and LLVM binutils at
+      # $CROSS_BINDIR, meson, ninja and pkgconf (nextbsd-toolchain#13).
+      image: ghcr.io/nextbsd/nextbsd-toolchain:${{ matrix.arch }}-${{ inputs.fbsd_sha && format('fbsd-{0}', inputs.fbsd_sha) || 'latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Stage the cross sysroot: compat's base, then nextbsd-userland
+      # (/usr/lib/system and the Mach headers, as nextbsd-displayserver-support
+      # stages it), then nextbsd-displayserver-support, then nextbsd-xlibs. Until
+      # nextbsd-xlibs#9, xlibs' own /usr/X11 copies of the libraries that
+      # moved to displayserver-support are removed, so only the /usr ones
+      # are seen (as nextbsd-xlibre's workflow does).
+      - name: Stage sysroot from compat, userland, displayserver-support and xlibs continuous
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/sysroot"
+          gh release download continuous \
+            --repo nextbsd/nextbsd-freebsd-compat \
+            --pattern "nextbsd-base-${{ matrix.arch }}.tar.gz" \
+            --output /tmp/base.tar.gz --clobber
+          gh release download continuous \
+            --repo nextbsd/nextbsd-userland \
+            --pattern "nextbsd-userland-${{ matrix.arch }}.tar.gz" \
+            --output /tmp/userland.tar.gz --clobber
+          gh release download continuous \
+            --repo nextbsd/nextbsd-displayserver-support \
+            --pattern "nextbsd-displayserver-support-${{ matrix.arch }}.tar.gz" \
+            --output /tmp/dss.tar.gz --clobber
+          gh release download continuous \
+            --repo nextbsd/nextbsd-xlibs \
+            --pattern "nextbsd-xlibs-${{ matrix.arch }}.tar.gz" \
+            --output /tmp/xlibs.tar.gz --clobber
+          for t in base userland dss xlibs; do
+            tar -C "$GITHUB_WORKSPACE/sysroot" -xzf "/tmp/$t.tar.gz"
+          done
+          n=0
+          for f in $(tar -tzf /tmp/dss.tar.gz | grep -v '/$' | sed -e 's#^\./##' \
+                       -e 's#^usr/libdata/pkgconfig/#usr/X11/lib/pkgconfig/#' \
+                       -e '/^usr\/X11\//!s#^usr/#usr/X11/#'); do
+            if [ -e "$GITHUB_WORKSPACE/sysroot/$f" ] || [ -L "$GITHUB_WORKSPACE/sysroot/$f" ]; then
+              rm -f "$GITHUB_WORKSPACE/sysroot/$f"
+              n=$((n + 1))
+            fi
+          done
+          echo "$n nextbsd-xlibs copies of displayserver-support files removed from the sysroot"
+
+      - name: Build and check Xnextbsd
+        env:
+          T: ${{ matrix.arch }}
+          TA: ${{ matrix.target_arch }}
+          SYSROOT: ${{ github.workspace }}/sysroot
+          DESTDIR: /stage
+        run: ./Xnextbsd/build-xnextbsd.sh
+
+      - name: Pack
+        run: |
+          tar -C /stage -czf "/tmp/Xnextbsd-${{ matrix.arch }}.tar.gz" Xnextbsd
+          tar -tzvf "/tmp/Xnextbsd-${{ matrix.arch }}.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Xnextbsd-${{ matrix.arch }}
+          path: /tmp/Xnextbsd-${{ matrix.arch }}.tar.gz

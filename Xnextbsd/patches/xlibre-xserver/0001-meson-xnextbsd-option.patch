@@ -1,0 +1,64 @@
+Description: meson: -Dxnextbsd, the rootless X server on NextBSD's WindowServer.
+ Adds the xnextbsd option (default false) and builds hw/nextbsd when it is
+ on. Xnextbsd draws through miext/rootless, so the option turns rootless on
+ as XQuartz does, which sets ROOTLESS, ROOTLESS_WORKAROUND and
+ ROOTLESS_SAFEALPHA in dix-config.h for the whole tree: Xnextbsd is a build
+ of its own, never one with Xorg (-Dxorg=false -Dxnextbsd=true).
+ .
+ hw/nextbsd itself is not in this patch: build-xnextbsd.sh copies it from
+ this repo's Xnextbsd/hw/nextbsd into the source tree before configuring,
+ so the server's sources are reviewed and changed as ordinary files.
+Origin: NextBSD
+ (nextbsd/apps-xlibre#2 and #3, E37 nextbsd/nextbsd#625)
+Forwarded: not-needed (NextBSD only)
+ .
+ Against XLibre 25.1.11 with nextbsd-xlibre's patches/xlibre-xserver series
+ applied (0006 adds an option to meson_options.txt).
+---
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -14,6 +14,8 @@
+        description: 'Enable XWin X server')
+ option('xquartz', type: 'combo', choices: ['true', 'false', 'auto'], value: 'auto',
+        description: 'Enable Xquartz X server')
++option('xnextbsd', type: 'boolean', value: false,
++       description: 'Enable Xnextbsd, the rootless X server on NextBSD WindowServer')
+ 
+ option('kdrive_kbd', type: 'boolean', value: true,
+        description: 'Build kbd driver for kdrive')
+--- a/meson.build
++++ b/meson.build
+@@ -270,9 +270,11 @@
+ else
+     build_xquartz = get_option('xquartz') == 'true'
+ endif
++
++build_xnextbsd = get_option('xnextbsd')
+ 
+ build_rootless = false
+-if build_xquartz
++if build_xquartz or build_xnextbsd
+     build_rootless = true
+ endif
+ 
+@@ -284,6 +286,7 @@
+         'Xvfb': build_xvfb,
+         'Xwin': build_xwin,
+         'Xquartz': build_xquartz,
++        'Xnextbsd': build_xnextbsd,
+         'Xephyr': get_option('xephyr'),
+         'Xfbdev': get_option('xfbdev'),
+     },
+--- a/hw/meson.build
++++ b/hw/meson.build
+@@ -16,6 +16,10 @@
+     subdir('xquartz')
+ endif
+ 
++if build_xnextbsd
++    subdir('nextbsd')
++endif
++
+ if build_xwin
+     subdir('xwin')
+ endif

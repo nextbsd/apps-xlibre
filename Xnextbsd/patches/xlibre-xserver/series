@@ -1,0 +1,7 @@
+# patches/xlibre-xserver/series: this repo's own patches, applied with
+# patch -p1 after nextbsd-xlibre's series (fetched read-only at the commit
+# sources.lock pins).
+#
+#   0001  -Dxnextbsd: build hw/nextbsd (copied in from Xnextbsd/hw/nextbsd)
+#         with miext/rootless (nextbsd/apps-xlibre#2).
+0001-meson-xnextbsd-option.patch
