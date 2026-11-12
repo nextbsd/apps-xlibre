@@ -63,6 +63,10 @@
 // Where a window that doesn't ask for a position goes (top-left corner).
 @property (nonatomic, assign) int16_t placementX;
 @property (nonatomic, assign) int16_t placementY;
+// Where a new window without a position of its own goes: the placement
+// point, cascaded down and to the right past windows already there.
+- (void) cascadePositionForWidth:(uint16_t)width height:(uint16_t)height
+                               x:(int16_t *)x y:(int16_t *)y;
 
 + (XCBConnection *) sharedConnectionAsWindowManager:(BOOL)asWindowManager;
 - (xcb_connection_t *) connection;
