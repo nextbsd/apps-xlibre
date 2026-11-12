@@ -18,9 +18,14 @@ name: Build Xnextbsd
 # build-xnextbsd.sh builds it into the sysroot from apps-windowserver at
 # the pinned commit.
 #
-# The binary is uploaded as a workflow artifact (Xnextbsd-<arch>.tar.gz);
-# nothing is published or dispatched. The window manager has its own
-# workflow (build.yml).
+# The binary is uploaded as a workflow artifact (Xnextbsd-<arch>.tar.gz).
+# On pushes to master (and manual runs from master), the publish job also
+# puts it on the rolling `xnextbsd-latest` release, replaced each run, since
+# NextBSD has no meson or ninja to build it with: Xnextbsd-<arch> (named by
+# NextBSD's `uname -m`, amd64 or arm64), Xnextbsd-<arch>.sha256 and
+# SHA256SUMS. nextbsd-gnustep-apps' install-apps.sh fetches it from there
+# for `gmake install XNEXTBSD=...`. Nothing is dispatched. The window
+# manager has its own workflow (build.yml).
 
 on:
   push:
@@ -34,6 +39,10 @@ on:
         description: 'Pinned FreeBSD SHA for the toolchain image tag (blank = latest)'
         required: false
         default: ''
+
+# Read only by default; only the publish job may write (the release).
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -110,3 +119,52 @@ jobs:
         with:
           name: Xnextbsd-${{ matrix.arch }}
           path: /tmp/Xnextbsd-${{ matrix.arch }}.tar.gz
+
+  publish:
+    needs: build
+    # Pushes to master and manual runs from master; never pull requests.
+    if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Unpack binaries and checksum them
+        run: |
+          mkdir -p out
+          for arch in amd64 arm64; do
+            tar -C artifacts -xzf "artifacts/Xnextbsd-$arch/Xnextbsd-$arch.tar.gz" Xnextbsd
+            mv artifacts/Xnextbsd "out/Xnextbsd-$arch"
+            (cd out && sha256sum "Xnextbsd-$arch" > "Xnextbsd-$arch.sha256")
+          done
+          (cd out && cat Xnextbsd-*.sha256 > SHA256SUMS)
+          ls -la out/
+          cat out/SHA256SUMS
+
+      # A rolling release: the tag is moved to this commit and the assets
+      # are replaced (same names each run), so the download URLs stay put:
+      # https://github.com/nextbsd/apps-xlibre/releases/download/xnextbsd-latest/Xnextbsd-<arch>
+      - name: Publish to the xnextbsd-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: xnextbsd-latest
+        run: |
+          if gh api "repos/$GH_REPO/git/refs/tags/$TAG" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$TAG" \
+              -f sha="$GITHUB_SHA" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/$GH_REPO/git/refs" \
+              -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" >/dev/null
+          fi
+          notes="Xnextbsd built from $GITHUB_SHA by run $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID. Replaced on every build of master. Install with nextbsd-gnustep-apps' install-apps.sh, or: gmake install XNEXTBSD=/path/to/Xnextbsd-\$(uname -m)"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes "$notes"
+          else
+            gh release create "$TAG" --verify-tag --prerelease \
+              --title "Xnextbsd (latest master build)" --notes "$notes"
+          fi
+          gh release upload "$TAG" out/* --clobber
