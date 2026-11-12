@@ -1,0 +1,27 @@
+# sources.lock: everything build-xnextbsd.sh fetches, pinned.
+#
+# One line per source:  <name> <version> <sha256> <url>
+# build-xnextbsd.sh downloads <url>, refuses it unless its SHA-256 is
+# <sha256>, and unpacks it. Bumping a pin is a deliberate change to this
+# file (wiki: Source-Repo-Conventions).
+
+# The XLibre X server: the same tag archive and SHA-256 as nextbsd-xlibre's
+# sources.lock, so Xnextbsd and Xorg are built from the same XLibre. When
+# nextbsd-xlibre moves to another XLibre, this line and the nextbsd-xlibre
+# pin below move with it (the cost of building outside nextbsd-xlibre).
+xlibre-xserver      25.1.11       9696857b273a591d98791060d944b1dad6eb0980cc709fb993db1609fefbece2  https://github.com/X11Libre/xserver/archive/refs/tags/xlibre-xserver-25.1.11.tar.gz
+
+# nextbsd-xlibre at a commit, read only: its patches/xlibre-xserver series is
+# applied to the server first (the same patches Xorg is built with), and CI
+# uses its meson cross files (cross/meson/<arch>.ini). Nothing in
+# nextbsd-xlibre is changed. The SHA-256 is that of GitHub's archive of the
+# commit.
+nextbsd-xlibre      7b084e8a7230ffaaef87140be8d0084b2a60e6ca  77243026ceb2976d480f5b41afd9f657ae09f5be13f89e77d4b6f29bce91391b  https://github.com/nextbsd/nextbsd-xlibre/archive/7b084e8a7230ffaaef87140be8d0084b2a60e6ca.tar.gz
+
+# apps-windowserver at a commit (CI only): libWindowServerClient and its
+# headers are built from it into the cross sysroot, since apps-windowserver
+# publishes no artifact yet. On a NextBSD system the installed library is
+# used. This commit has the X server protocol (apps-windowserver#4-#7:
+# joining an app, the keymap and XKB state, XRGB8888 buffers, restack
+# notices), which Xnextbsd uses when the WindowServer it runs on has it.
+apps-windowserver   04cb4c5b14e0e1d27d350754d75c83034d24a8a9  842eaabf80c1231800e2609f6b9ba1681c09669c99ca96274a0267315e41f4c2  https://github.com/nextbsd/apps-windowserver/archive/04cb4c5b14e0e1d27d350754d75c83034d24a8a9.tar.gz
