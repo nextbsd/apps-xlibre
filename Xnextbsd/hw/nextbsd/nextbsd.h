@@ -80,6 +80,8 @@ typedef struct nbFrame {
                                    a tile) while X keeps it mapped */
     uint32_t limits[4];         /* the size limits WindowServer last got:
                                    min width, height, max width, height */
+    char *title;                /* the title WindowServer last got (the
+                                   client's name), NULL for the first one */
     RootlessWindowPtr rwin;
 } nbFrame;
 

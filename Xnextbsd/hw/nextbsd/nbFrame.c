@@ -731,6 +731,7 @@ nbDestroyFrame(RootlessFrameID wid)
     RegionUninit(&frame->damage);
     RegionUninit(&frame->shape);
     free(frame->bits);
+    free(frame->title);
     free(frame);
 }
 
@@ -1216,8 +1217,11 @@ nbFrameFollowMinimized(nbFrame *frame, WindowPtr pWin)
         if (nbScreenInfo.pointer_frame == frame)
             nbScreenInfo.pointer_frame = NULL;
     } else {
-        /* Ordering it in takes it out of the Dock. */
+        /* Ordering it in takes it out of the Dock. X's focus may still
+           be in it: make it key again (nbFocusCheck). */
         frame->minimized = FALSE;
+        if (nbScreenInfo.x_focus_frame == frame)
+            nbScreenInfo.x_focus_frame = NULL;
         ok = ws_window_order(nbConnection(), frame->wid,
                              nbScreenInfo.hidden ? WS_ORDER_OUT :
                              WS_ORDER_ABOVE, 0);
@@ -1228,6 +1232,38 @@ nbFrameFollowMinimized(nbFrame *frame, WindowPtr pWin)
     }
     if (ok < 0)
         nbWindowServerLost("minimize");
+}
+
+/*
+ * The window's title on WindowServer, which the Dock shows for minimized
+ * windows and in its window lists: the client's _NET_WM_NAME (UTF-8), or
+ * its WM_NAME when that is ASCII.
+ */
+static void
+nbFrameSendTitle(nbFrame *frame, WindowPtr pWin)
+{
+    WindowPtr client = nbFrameClient(pWin);
+    PropertyPtr prop = nbProperty(client, "_NET_WM_NAME", 8);
+    char title[WS_MAX_TITLE];
+    size_t len, i;
+
+    if (prop == NULL) {
+        prop = nbProperty(client, "WM_NAME", 8);
+        for (i = 0; prop != NULL && i < (size_t) prop->size; i++)
+            if (((const unsigned char *) prop->data)[i] >= 0x80)
+                prop = NULL;
+    }
+    if (prop == NULL || prop->size == 0)
+        return;
+    len = min((size_t) prop->size, sizeof(title) - 1);
+    memcpy(title, prop->data, len);
+    title[len] = '\0';
+    if (frame->title != NULL && strcmp(frame->title, title) == 0)
+        return;
+    free(frame->title);
+    frame->title = strdup(title);
+    if (ws_window_set_title(nbConnection(), frame->wid, title) < 0)
+        nbWindowServerLost("title");
 }
 
 /*
@@ -1267,7 +1303,7 @@ nbFrameSendSizeLimits(nbFrame *frame, WindowPtr pWin)
 /*
  * Before the server sleeps, after a window manager property changed (or
  * a frame came, went on screen, or changed size): bring every frame's
- * flags, size limits and minimized state up to date.
+ * flags, title, size limits and minimized state up to date.
  */
 void
 nbFramesUpdate(void)
@@ -1291,6 +1327,7 @@ nbFramesUpdate(void)
                 return;
             }
         }
+        nbFrameSendTitle(frame, pWin);
         nbFrameSendSizeLimits(frame, pWin);
         nbFrameFollowMinimized(frame, pWin);
         if (nbConnection() == NULL)
@@ -1345,7 +1382,7 @@ nbPropertyFilter(CallbackListPtr *pcbl, void *unused, void *calldata)
 {
     static const char *const watched[] = {
         NB_MINIMIZED_ATOM, "WM_NORMAL_HINTS", "WM_TRANSIENT_FOR",
-        "_NET_WM_WINDOW_TYPE", "WM_STATE",
+        "_NET_WM_WINDOW_TYPE", "WM_STATE", "WM_NAME", "_NET_WM_NAME",
     };
     PropertyFilterParam *p = calldata;
     ScreenPtr pScreen = screenInfo.screens[0];
