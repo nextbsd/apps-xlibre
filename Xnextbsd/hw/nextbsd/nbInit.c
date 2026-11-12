@@ -25,8 +25,9 @@
 
 /*
  * Xnextbsd is a rootless X server: every top-level X window is a
- * WindowServer window, drawn by miext/rootless into a buffer shared with
- * WindowServer, and X input comes from WindowServer's events. It is
+ * WindowServer window, drawn by miext/rootless and shown through two
+ * buffers shared with WindowServer (nbFrame.c), and X input comes from
+ * WindowServer's events. It is
  * modelled on XQuartz's xpr layer (hw/xquartz/xpr), with
  * libWindowServerClient in the place of Apple's Xplugin.
  *
