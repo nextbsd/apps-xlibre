@@ -193,6 +193,12 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
     [[NSNotificationCenter defaultCenter]
         addObserver:self selector:@selector(appDidUnhide:)
                name:NSApplicationDidUnhideNotification object:nil];
+    [[NSNotificationCenter defaultCenter]
+        addObserver:self selector:@selector(windowDidBecomeKey:)
+               name:NSWindowDidBecomeKeyNotification object:nil];
+    [[NSNotificationCenter defaultCenter]
+        addObserver:self selector:@selector(windowDidResignKey:)
+               name:NSWindowDidResignKeyNotification object:nil];
 
     _watchdog = [NSTimer scheduledTimerWithTimeInterval:1.0 target:self
                                                selector:@selector(watchServer:)
@@ -341,6 +347,32 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
 - (void)appDidUnhide:(NSNotification *)n
 {
     [self setXHidden:NO];
+}
+
+// Our own panels (About, Preferences, the Quit alert) and the X windows
+// share one app on WindowServer: while a panel is key, the X window loses
+// X's focus and its active title bar, and gets them back after.
+- (void)windowDidBecomeKey:(NSNotification *)n
+{
+    [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                             selector:@selector(restoreXFocus)
+                                               object:nil];
+    [_wm appKitWindowBecameKey];
+}
+
+// Wait a moment: the panel may only be handing the key to another of ours,
+// or the user clicked an X window, which Xnextbsd focuses itself.
+- (void)windowDidResignKey:(NSNotification *)n
+{
+    [self performSelector:@selector(restoreXFocus) withObject:nil
+               afterDelay:0.15
+                  inModes:@[NSDefaultRunLoopMode, NSModalPanelRunLoopMode]];
+}
+
+- (void)restoreXFocus
+{
+    if ([NSApp keyWindow] == nil)
+        [_wm appKitWindowsResignedKey];
 }
 
 #pragma mark - Preferences
