@@ -33,6 +33,7 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
     BOOL _serverGone;
     NSPanel *_prefs;
     NSTextField *_prefsAppToRun;
+    NSButton *_prefsSelectToClipboard;
     NSMutableArray *_openedPrograms;
 }
 
@@ -44,7 +45,10 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
         @"XLibreAppToRun": @"/usr/X11/bin/xterm",
         @"XLibreTerminal": @"/usr/X11/bin/xterm",
         @"XLibreApplications": @[],
-        @"XLibreXResources": @"XTerm*selectToClipboard: true\n",
+        @"XLibreXResources": @"",
+        // xterm's selections go to CLIPBOARD (the general pasteboard, so
+        // Command-V pastes them in GNUstep apps) as well as PRIMARY.
+        @"XLibreSelectToClipboard": @YES,
     }];
 }
 
@@ -217,20 +221,28 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
         [[_wm connection] setPlacementX:(int16_t)(NSMaxX(f) + 22)];
 }
 
-// X resources for the new server's RESOURCE_MANAGER, as xrdb would load.
+// X resources for the server's RESOURCE_MANAGER, as xrdb would load:
+// XTerm*selectToClipboard (XLibreSelectToClipboard), then the
+// XLibreXResources default. Programs started afterwards see them.
 - (void)loadResources
 {
-    NSString *res = [[NSUserDefaults standardUserDefaults]
-                        stringForKey:@"XLibreXResources"];
-    NSData *data = [res dataUsingEncoding:NSUTF8StringEncoding];
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    NSMutableString *res = [NSMutableString string];
+    NSData *data;
     xcb_connection_t *c = [[_wm connection] connection];
     xcb_screen_t *screen = xcb_setup_roots_iterator(xcb_get_setup(c)).data;
 
+    if ([d boolForKey:@"XLibreSelectToClipboard"])
+        [res appendString:@"XTerm*selectToClipboard: true\n"];
+    if ([d stringForKey:@"XLibreXResources"] != nil)
+        [res appendString:[d stringForKey:@"XLibreXResources"]];
+    data = [res dataUsingEncoding:NSUTF8StringEncoding];
     if ([data length] == 0)
-        return;
-    xcb_change_property(c, XCB_PROP_MODE_REPLACE, screen->root,
-                        XCB_ATOM_RESOURCE_MANAGER, XCB_ATOM_STRING, 8,
-                        (uint32_t)[data length], [data bytes]);
+        xcb_delete_property(c, screen->root, XCB_ATOM_RESOURCE_MANAGER);
+    else
+        xcb_change_property(c, XCB_PROP_MODE_REPLACE, screen->root,
+                            XCB_ATOM_RESOURCE_MANAGER, XCB_ATOM_STRING, 8,
+                            (uint32_t)[data length], [data bytes]);
     xcb_flush(c);
 }
 
@@ -384,7 +396,7 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
         NSView *view;
 
         _prefs = [[NSPanel alloc]
-            initWithContentRect:NSMakeRect(0, 0, 420, 120)
+            initWithContentRect:NSMakeRect(0, 0, 420, 160)
                       styleMask:NSTitledWindowMask | NSClosableWindowMask
                         backing:NSBackingStoreBuffered
                           defer:YES];
@@ -393,7 +405,7 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
         [_prefs setDelegate:(id)self];
         view = [_prefs contentView];
 
-        label = [[NSTextField alloc] initWithFrame:NSMakeRect(16, 78, 388, 20)];
+        label = [[NSTextField alloc] initWithFrame:NSMakeRect(16, 118, 388, 20)];
         [label setStringValue:@"Run when XLibre starts:"];
         [label setEditable:NO];
         [label setSelectable:NO];
@@ -402,12 +414,12 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
         [view addSubview:label];
 
         _prefsAppToRun = [[NSTextField alloc]
-                             initWithFrame:NSMakeRect(16, 50, 388, 24)];
+                             initWithFrame:NSMakeRect(16, 90, 388, 24)];
         [_prefsAppToRun setTarget:self];
         [_prefsAppToRun setAction:@selector(appToRunChanged:)];
         [view addSubview:_prefsAppToRun];
 
-        note = [[NSTextField alloc] initWithFrame:NSMakeRect(16, 12, 388, 32)];
+        note = [[NSTextField alloc] initWithFrame:NSMakeRect(16, 52, 388, 32)];
         [note setStringValue:@"Leave empty to start nothing. More programs "
               "for the Applications menu: the XLibreApplications default."];
         [note setEditable:NO];
@@ -416,10 +428,22 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
         [note setDrawsBackground:NO];
         [note setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
         [view addSubview:note];
+
+        _prefsSelectToClipboard = [[NSButton alloc]
+                                      initWithFrame:NSMakeRect(16, 16, 388, 22)];
+        [_prefsSelectToClipboard setButtonType:NSSwitchButton];
+        [_prefsSelectToClipboard setTitle:
+            @"Copy xterm selections to the clipboard"];
+        [_prefsSelectToClipboard setTarget:self];
+        [_prefsSelectToClipboard setAction:@selector(selectToClipboardChanged:)];
+        [view addSubview:_prefsSelectToClipboard];
         [_prefs center];
     }
     [_prefsAppToRun setStringValue:[[NSUserDefaults standardUserDefaults]
                                        stringForKey:@"XLibreAppToRun"] ?: @""];
+    [_prefsSelectToClipboard setState:
+        [[NSUserDefaults standardUserDefaults]
+            boolForKey:@"XLibreSelectToClipboard"] ? NSOnState : NSOffState];
     [_prefs makeKeyAndOrderFront:nil];
     [_prefs makeFirstResponder:_prefsAppToRun];
 }
@@ -429,6 +453,16 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
     [[NSUserDefaults standardUserDefaults]
         setObject:[_prefsAppToRun stringValue] forKey:@"XLibreAppToRun"];
     [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+// New xterms follow at once; running ones keep what they started with.
+- (void)selectToClipboardChanged:(id)sender
+{
+    [[NSUserDefaults standardUserDefaults]
+        setBool:[_prefsSelectToClipboard state] == NSOnState
+         forKey:@"XLibreSelectToClipboard"];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    [self loadResources];
 }
 
 - (void)windowWillClose:(NSNotification *)n
