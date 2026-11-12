@@ -20,6 +20,7 @@
 #import "XCBTypes.h"
 #import <dispatch/dispatch.h>
 #import <GNUstepGUI/GSTheme.h>
+#import <AppKit/NSApplication.h>
 #import <AppKit/NSColor.h>
 #import <AppKit/NSGraphics.h>
 
@@ -54,6 +55,37 @@
 
 // Find 32-bit ARGB visual for alpha transparency support
 // Returns visual ID and fills in visualType if found
+// The window manager's minimize channel to Xnextbsd (NB_MINIMIZED_ATOM and
+// NB_RESTORE_ATOM in Xnextbsd/hw/nextbsd/nextbsd.h): _XNEXTBSD_MINIMIZED
+// (CARDINAL/32, where: WindowServer's WS_MINIMIZE_*) on a top-level window
+// minimizes it on WindowServer, deleting it shows it again, and Xnextbsd
+// sends _XNEXTBSD_RESTORE when the user restores it from the Dock.
+#define XL_MINIMIZED_ATOM "_XNEXTBSD_MINIMIZED"
+#define XL_RESTORE_ATOM "_XNEXTBSD_RESTORE"
+#define XL_MINIMIZE_BOTTOM_ROW 1        // WS_MINIMIZE_BOTTOM_ROW
+#define XL_MINIMIZE_INTO_DOCK 2         // WS_MINIMIZE_INTO_DOCK
+
+// Where minimized windows go, as GNUstep apps decide it (libs-back's
+// nextbsd backend): the NBMinimizeStyle desktop setting, the user's value,
+// else the theme's, else "dock". "dock" puts them in the Dock; "previews"
+// and "nextstep" on WindowServer's bottom row (an X window has no NeXT
+// miniwindow).
+static uint32_t XLMinimizeWhere(void)
+{
+    NSArray *styles = [NSArray arrayWithObjects:@"nextstep", @"previews", @"dock", nil];
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    id style;
+
+    // Pick up a change Workspace Preferences just saved.
+    [defaults synchronize];
+    style = [defaults objectForKey:@"NBMinimizeStyle"];
+    if (![style isKindOfClass:[NSString class]] || ![styles containsObject:style])
+        style = [[[GSTheme theme] infoDictionary] objectForKey:@"NBMinimizeStyle"];
+    if (![style isKindOfClass:[NSString class]] || ![styles containsObject:style])
+        style = @"dock";
+    return [style isEqualToString:@"dock"] ? XL_MINIMIZE_INTO_DOCK : XL_MINIMIZE_BOTTOM_ROW;
+}
+
 static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **outVisualType) {
     if (!screen) return 0;
 
@@ -843,147 +875,11 @@ static XCBConnection *sharedInstance;
             //NSLog(@"[MapRequest] Window has frame parent %u", [frame window]);
 
             // If the frame is minimized, this is a restoration request
+            // (ICCCM: a client leaves IconicState by mapping its window).
             if ([frame isMinimized] || [window isMinimized])
             {
-                //NSLog(@"[MapRequest] Restoring minimized window from GNUstep");
-
-                // Check if this window belongs to a group (has a leader)
-                XCBWindow *leader = [window leaderWindow];
-
-                if (leader && [leader window] != XCB_NONE)
-                {
-                    //NSLog(@"[MapRequest] Window %u has leader %u, restoring all grouped windows",
-                    //      [window window], [leader window]);
-
-                    // Find and restore all windows with the same leader
-                    NSArray *allWindows = [windowsMap allValues];
-                    for (XCBWindow *groupedWindow in allWindows)
-                    {
-                        // Skip windows that aren't minimized or don't share the same leader
-                        if (![groupedWindow isMinimized])
-                            continue;
-
-                        XCBWindow *groupedLeader = [groupedWindow leaderWindow];
-                        if (!groupedLeader || [groupedLeader window] != [leader window])
-                            continue;
-
-                        // This window is part of the group and minimized - restore it
-                        //NSLog(@"[MapRequest] Restoring grouped window %u", [groupedWindow window]);
-
-                        XCBFrame *groupedFrame = nil;
-                        XCBTitleBar *groupedTitleBar = nil;
-
-                        if ([[groupedWindow parentWindow] isKindOfClass:[XCBFrame class]])
-                        {
-                            groupedFrame = (XCBFrame *)[groupedWindow parentWindow];
-                            groupedTitleBar = (XCBTitleBar *)[groupedFrame childWindowForKey:TitleBar];
-
-                            [self mapWindow:groupedFrame];
-
-                            if (groupedTitleBar)
-                            {
-                                [self mapWindow:groupedTitleBar];
-                            }
-                        }
-
-                        [self mapWindow:groupedWindow];
-
-                        // Clear minimized state
-                        if (groupedFrame)
-                        {
-                            [groupedFrame setIsMinimized:NO];
-                            [groupedFrame setNormalState];
-                            // Stack ALL grouped windows above other apps
-                            [groupedFrame stackAbove];
-                            [self restackDockWindowsAbove];
-                        }
-                        [groupedWindow setIsMinimized:NO];
-                        [groupedWindow setNormalState];
-
-                        if (groupedFrame) {
-                            Class compositorClass = NSClassFromString(@"URSCompositingManager");
-                            id<URSCompositingManaging> compositor = nil;
-                            if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
-                                compositor = [compositorClass performSelector:@selector(sharedManager)];
-                            }
-                            if (compositor && [compositor compositingActive]) {
-                                XCBWindow *iconWindow = groupedWindow;
-                                XCBRect iconRect = XCBInvalidRect;
-                                [self resolveIconGeometryForWindow:iconWindow outRect:&iconRect];
-                                XCBRect endRect = [groupedFrame windowRect];
-                                [compositor animateWindowRestore:[groupedFrame window]
-                                                       fromRect:iconRect
-                                                         toRect:endRect];
-                            }
-                        }
-
-                        // Focus only the originally requested window
-                        if ([groupedWindow window] == [window window])
-                        {
-                            if (groupedTitleBar)
-                            {
-                                [groupedTitleBar setIsAbove:YES];
-                                [groupedTitleBar drawTitleBarComponents];
-                                [self drawAllTitleBarsExcept:groupedTitleBar];
-                            }
-
-                            [groupedWindow focus];
-                        }
-                    }
-                }
-                else
-                {
-                    // No leader/group - restore just this window
-                    //NSLog(@"[MapRequest] No window group, restoring single window");
-
-                    [self mapWindow:frame];
-
-                    if (titleBar)
-                    {
-                        [self mapWindow:titleBar];
-                    }
-
-                    [self mapWindow:window];
-
-                    // Clear minimized state
-                    [frame setIsMinimized:NO];
-                    [window setIsMinimized:NO];
-                    [frame setNormalState];
-                    [window setNormalState];
-
-                    {
-                        Class compositorClass = NSClassFromString(@"URSCompositingManager");
-                        id<URSCompositingManaging> compositor = nil;
-                        if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
-                            compositor = [compositorClass performSelector:@selector(sharedManager)];
-                        }
-                        if (compositor && [compositor compositingActive]) {
-                            XCBWindow *iconWindow = window;
-                            XCBRect iconRect = XCBInvalidRect;
-                            [self resolveIconGeometryForWindow:iconWindow outRect:&iconRect];
-                            XCBRect endRect = [frame windowRect];
-                            [compositor animateWindowRestore:[frame window]
-                                                   fromRect:iconRect
-                                                     toRect:endRect];
-                        }
-                    }
-
-                    // Bring to front and focus
-                    [frame stackAbove];
-                    [frame raiseResizeHandle];
-                    [self restackDockWindowsAbove];
-
-                    if (titleBar)
-                    {
-                        [titleBar setIsAbove:YES];
-                        [titleBar drawTitleBarComponents];
-                        [self drawAllTitleBarsExcept:titleBar];
-                    }
-
-                    [window focus];
-                }
-
-                //NSLog(@"[MapRequest] Restoration complete");
+                [self mapWindow:window];
+                [self restoreMinimizedWindow:window activate:YES];
             }
             else
             {
@@ -1988,10 +1884,13 @@ static XCBConnection *sharedInstance;
 {
     // NSLog(@"In configure notify for window %u: %d, %d", anEvent->window, anEvent->x, anEvent->y);
 
-    // A frame moved by someone else: Xnextbsd, following WindowServer when
-    // it puts a window back on a screen that shrank. Keep the cached
-    // position in step (not while a drag or resize of ours is going on,
-    // whose own moves are already cached).
+    // A frame moved or resized by someone else: Xnextbsd, following
+    // WindowServer when window tiling lays it out or it puts a window back
+    // on a screen that shrank. Keep the cached position in step (not while
+    // a drag or resize of ours is going on, whose own moves are already
+    // cached), and lay a resized frame out again: the title bar and the
+    // client fill it, and the client gets its ConfigureNotify. Xnextbsd
+    // has already kept the size within the client's WM_NORMAL_HINTS.
     XCBScreen *rootScreen = [screens firstObject];
     if (dragState || resizeState || rootScreen == nil ||
         anEvent->event != [rootScreen screen]->root)
@@ -1999,12 +1898,36 @@ static XCBConnection *sharedInstance;
     XCBWindow *window = [self windowForXCBId:anEvent->window];
     if (![window isKindOfClass:[XCBFrame class]])
         return;
-    XCBRect r = [window windowRect];
-    if (r.position.x == anEvent->x && r.position.y == anEvent->y)
+    XCBFrame *frame = (XCBFrame *)window;
+    XCBRect r = [frame windowRect];
+    BOOL resized = r.size.width != anEvent->width || r.size.height != anEvent->height;
+    if (r.position.x == anEvent->x && r.position.y == anEvent->y && !resized)
         return;
     r.position.x = anEvent->x;
     r.position.y = anEvent->y;
-    [window setWindowRect:r];
+    if (!resized) {
+        [frame setWindowRect:r];
+        return;
+    }
+    // Tiling may resize it several times before we get here: lay it out
+    // at the size it has now, not at an older one this event reports,
+    // which would make it bigger than its tile again.
+    xcb_get_geometry_reply_t *geometry =
+        xcb_get_geometry_reply(connection, xcb_get_geometry(connection, [frame window]), NULL);
+    if (geometry == NULL)
+        return;
+    r.position.x = geometry->x;
+    r.position.y = geometry->y;
+    r.size.width = geometry->width;
+    r.size.height = geometry->height;
+    free(geometry);
+    XCBTitleBar *titleBar = (XCBTitleBar *)[frame childWindowForKey:TitleBar];
+    [frame programmaticResizeToRect:r];
+    // A client that can't be resized keeps its frame: cache what X has.
+    [frame setWindowRect:r];
+    [titleBar drawTitleBarComponents];
+    [frame updateAllResizeZonePositions];
+    xcb_flush(connection);
 }
 
 - (void)handleMotionNotify:(xcb_motion_notify_event_t *)anEvent
@@ -2994,121 +2917,26 @@ static XCBConnection *sharedInstance;
     }
 
 
+    // WM_CHANGE_STATE IconicState (XIconifyWindow, the title bar's
+    // minimize button): minimize into WindowServer. NormalState brings it
+    // back. Xnextbsd's _XNEXTBSD_RESTORE says the user restored it from
+    // the Dock, a tile or the overview, and WindowServer activated us.
+    XCBWindow *stateTarget = frame ? (XCBWindow *)frame : window;
+    BOOL stateMinimized = [frame isMinimized] || [clientWindow isMinimized] ||
+                          (frame == nil && [window isMinimized]);
+
     if (anEvent->type == [atomService atomFromCachedAtomsWithKey:[icccmService WMChangeState]] &&
-        anEvent->format == 32 &&
-        anEvent->data.data32[0] == ICCCM_WM_STATE_ICONIC &&
-        ![frame isMinimized])
+        anEvent->format == 32 && stateTarget != nil)
     {
-        //NSLog(@"[WM_CHANGE_STATE] Minimizing window %u", anEvent->window);
-
-        XCBWindow *targetWindow = frame ? (XCBWindow *)frame : window;
-        if (targetWindow) {
-            Class compositorClass = NSClassFromString(@"URSCompositingManager");
-            id<URSCompositingManaging> compositor = nil;
-            if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
-                compositor = [compositorClass performSelector:@selector(sharedManager)];
-            }
-
-            XCBWindow *iconWindow = clientWindow ? clientWindow : targetWindow;
-            XCBRect iconRect = XCBInvalidRect;
-            [self resolveIconGeometryForWindow:iconWindow outRect:&iconRect];
-            XCBRect startRect = [targetWindow windowRect];
-
-            if (compositor && [compositor compositingActive]) {
-                // Defer unmap until the compositor finishes the minimize
-                // animation, so the window stays in the X server tree and
-                // the compositor's stacking order cache can find it.
-                dispatch_block_t hideWindows = ^{
-                    if (frame != nil) {
-                        [frame setIconicState];
-                        [frame setIsMinimized:YES];
-                        [self unmapWindow:frame];
-                    }
-                    if (titleBar != nil) {
-                        [self unmapWindow:titleBar];
-                    }
-                    if (clientWindow) {
-                        [clientWindow setIconicState];
-                        [clientWindow setIsMinimized:YES];
-                        [self unmapWindow:clientWindow];
-                    }
-                };
-                [compositor animateWindowMinimize:[targetWindow window]
-                                        fromRect:startRect
-                                          toRect:iconRect
-                                      completion:hideWindows];
-            } else {
-                // No compositor — hide immediately
-                if (frame != nil) {
-                    [frame setIconicState];
-                    [frame setIsMinimized:YES];
-                    [self unmapWindow:frame];
-                }
-                if (titleBar != nil) {
-                    [self unmapWindow:titleBar];
-                }
-                if (clientWindow) {
-                    [clientWindow setIconicState];
-                    [clientWindow setIsMinimized:YES];
-                    [self unmapWindow:clientWindow];
-                }
-            }
-        }
-
-        //NSLog(@"[WM_CHANGE_STATE] Window minimized (hidden)");
+        if (anEvent->data.data32[0] == ICCCM_WM_STATE_ICONIC && !stateMinimized)
+            [self minimizeWindowIntoWindowServer:stateTarget];
+        else if (anEvent->data.data32[0] != ICCCM_WM_STATE_ICONIC && stateMinimized)
+            [self restoreMinimizedWindow:stateTarget activate:YES];
     }
-    else if ([frame isMinimized] &&
-             anEvent->type == [atomService atomFromCachedAtomsWithKey:[icccmService WMChangeState]] &&
-             anEvent->format == 32 &&
-             anEvent->data.data32[0] != ICCCM_WM_STATE_ICONIC)
+    else if (anEvent->format == 32 && stateTarget != nil && stateMinimized &&
+             anEvent->type == [self xnextbsdAtom:XL_RESTORE_ATOM])
     {
-        //NSLog(@"[WM_CHANGE_STATE] Restoring window %u", anEvent->window);
-
-        if (frame != nil)
-        {
-            [self mapWindow:frame];
-            [frame setIsMinimized:NO];
-            [frame setNormalState];
-        }
-
-        if (titleBar != nil)
-        {
-            [self mapWindow:titleBar];
-            [titleBar drawTitleBarComponents];
-        }
-
-        if (clientWindow)
-        {
-            [self mapWindow:clientWindow];
-            [clientWindow setIsMinimized:NO];
-            [clientWindow setNormalState];
-        }
-
-        XCBWindow *restoreTarget = frame ? (XCBWindow *)frame : window;
-        if (restoreTarget) {
-            Class compositorClass = NSClassFromString(@"URSCompositingManager");
-            id<URSCompositingManaging> compositor = nil;
-            if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
-                compositor = [compositorClass performSelector:@selector(sharedManager)];
-            }
-            if (compositor && [compositor compositingActive]) {
-                XCBWindow *iconWindow = clientWindow ? clientWindow : restoreTarget;
-                XCBRect iconRect = XCBInvalidRect;
-                [self resolveIconGeometryForWindow:iconWindow outRect:&iconRect];
-                XCBRect endRect = [restoreTarget windowRect];
-                [compositor animateWindowRestore:[restoreTarget window]
-                                       fromRect:iconRect
-                                         toRect:endRect];
-            }
-        }
-
-        [frame stackAbove];
-        [frame raiseResizeHandle];
-        [self restackDockWindowsAbove];
-        [clientWindow focus];
-        [self drawAllTitleBarsExcept:titleBar];
-
-        //NSLog(@"[WM_CHANGE_STATE] Window restored");
+        [self restoreMinimizedWindow:stateTarget activate:NO];
     }
 
     window = nil;
@@ -3527,6 +3355,127 @@ static XCBConnection *sharedInstance;
         [aFrame setTopBorderClicked:YES];
     }
 
+}
+
+#pragma mark - Minimizing on WindowServer
+
+- (xcb_atom_t)xnextbsdAtom:(const char *)name
+{
+    xcb_intern_atom_reply_t *reply =
+        xcb_intern_atom_reply(connection,
+                              xcb_intern_atom(connection, 0, (uint16_t)strlen(name), name),
+                              NULL);
+    xcb_atom_t atom = reply ? reply->atom : XCB_ATOM_NONE;
+
+    free(reply);
+    return atom;
+}
+
+// The frame, title bar and client of any of them; the frame is nil for a
+// window without decorations, whose client is the window itself.
+- (void)resolveWindow:(XCBWindow *)aWindow
+                frame:(XCBFrame **)frameOut
+             titleBar:(XCBTitleBar **)titleBarOut
+               client:(XCBWindow **)clientOut
+{
+    XCBFrame *frame = nil;
+
+    if ([aWindow isKindOfClass:[XCBFrame class]])
+        frame = (XCBFrame *)aWindow;
+    else if ([aWindow isKindOfClass:[XCBTitleBar class]] ||
+             [[aWindow parentWindow] isKindOfClass:[XCBFrame class]])
+        frame = (XCBFrame *)[aWindow parentWindow];
+    if (![frame isKindOfClass:[XCBFrame class]])
+        frame = nil;
+
+    *frameOut = frame;
+    *titleBarOut = frame ? (XCBTitleBar *)[frame childWindowForKey:TitleBar] : nil;
+    *clientOut = frame ? [frame childWindowForKey:ClientWindow] : aWindow;
+    if (*clientOut == nil)
+        *clientOut = aWindow;
+}
+
+- (void)minimizeWindowIntoWindowServer:(XCBWindow *)aWindow
+{
+    XCBFrame *frame;
+    XCBTitleBar *titleBar;
+    XCBWindow *client;
+    XCBWindow *top;
+    xcb_atom_t minimized = [self xnextbsdAtom:XL_MINIMIZED_ATOM];
+    uint32_t where = XLMinimizeWhere();
+
+    if (aWindow == nil || minimized == XCB_ATOM_NONE)
+        return;
+    [self resolveWindow:aWindow frame:&frame titleBar:&titleBar client:&client];
+    top = frame ? (XCBWindow *)frame : client;
+    if ([top isMinimized] && [client isMinimized])
+        return;
+
+    if (frame != nil) {
+        [frame setIconicState];
+        [frame setIsMinimized:YES];
+    }
+    [client setIconicState];
+    [client setIsMinimized:YES];
+    [[EWMHService sharedInstanceWithConnection:self] updateNetWmState:client];
+
+    // Xnextbsd minimizes the frame on WindowServer; the X windows stay
+    // mapped, so the Dock's preview of the window keeps up with it.
+    xcb_change_property(connection, XCB_PROP_MODE_REPLACE, [top window],
+                        minimized, XCB_ATOM_CARDINAL, 32, 1, &where);
+    if (titleBar != nil) {
+        [titleBar setIsAbove:NO];
+        [titleBar drawTitleBarComponents];
+    }
+    xcb_flush(connection);
+}
+
+- (void)restoreMinimizedWindow:(XCBWindow *)aWindow activate:(BOOL)activate
+{
+    XCBFrame *frame;
+    XCBTitleBar *titleBar;
+    XCBWindow *client;
+    XCBWindow *top;
+    xcb_atom_t minimized = [self xnextbsdAtom:XL_MINIMIZED_ATOM];
+
+    if (aWindow == nil)
+        return;
+    [self resolveWindow:aWindow frame:&frame titleBar:&titleBar client:&client];
+    top = frame ? (XCBWindow *)frame : client;
+
+    // Shown again on WindowServer (a no-op when Xnextbsd already did).
+    if (minimized != XCB_ATOM_NONE)
+        xcb_delete_property(connection, [top window], minimized);
+
+    if (frame != nil) {
+        [frame setIsMinimized:NO];
+        [frame setNormalState];
+    }
+    [client setIsMinimized:NO];
+    [client setNormalState];
+    [[EWMHService sharedInstanceWithConnection:self] updateNetWmState:client];
+
+    if (frame != nil) {
+        [frame stackAbove];
+        [frame raiseResizeHandle];
+    } else {
+        [client stackAbove];
+    }
+    [self restackDockWindowsAbove];
+    if (titleBar != nil) {
+        [titleBar setIsAbove:YES];
+        [titleBar drawTitleBarComponents];
+        [self drawAllTitleBarsExcept:titleBar];
+    }
+    [client focus];
+    xcb_flush(connection);
+
+    // Restoring a window of a hidden XLibre shows XLibre again, with its
+    // other windows, as for any app.
+    if ([NSApp isHidden])
+        [NSApp unhide:nil];
+    else if (activate && ![NSApp isActive])
+        [NSApp activateIgnoringOtherApps:YES];
 }
 
 - (void)drawAllTitleBarsExcept:(XCBTitleBar *)aTitileBar

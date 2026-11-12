@@ -60,6 +60,19 @@
  * (WS_SERVER_INPUT_REGION), while their buffers are premultiplied
  * ARGB8888 with nothing outside the bounding shape, so they look shaped
  * whatever their depth.
+ *
+ * Window tiling (WS_SERVER_TILING): WindowServer gives windows new frames,
+ * sizes included (WS_EVENT_WINDOW_FRAME). X follows: the top-level window
+ * is moved and resized, within the client's WM_NORMAL_HINTS, and the
+ * frame WindowServer has is put right when X's differs. Each frame tells
+ * WindowServer its size limits from those hints and whether it is a panel
+ * (a transient or dialog window, or an override-redirect one) or can't be
+ * resized, so that those float above the tiles.
+ *
+ * Minimizing (NB_MINIMIZED_ATOM): the window manager asks for it with a
+ * property on its frame, the frame is minimized on WindowServer while the
+ * X window stays mapped (so the Dock's preview of it is live), and
+ * WindowServer's WS_EVENT_WINDOW_RESTORE goes back to the window manager.
  */
 
 #include <dix-config.h>
@@ -74,6 +87,8 @@
 #include "dix/property_priv.h"
 #include "dix/resource_priv.h"
 #include "dix/window_priv.h"
+#include "inputstr.h"
+#include "propertyst.h"
 #include "scrnintstr.h"
 #include "windowstr.h"
 #include "rootlessCommon.h"
@@ -340,6 +355,214 @@ nbFrameDamageAll(nbFrame *frame)
     RegionReset(&frame->damage, &box);
 }
 
+/* ---- window manager properties ---- */
+
+/* A property of a window, NULL if it has none (or isn't format `format`). */
+static PropertyPtr
+nbProperty(WindowPtr pWin, const char *name, int format)
+{
+    Atom atom = MakeAtom(name, strlen(name), FALSE);
+    PropertyPtr prop;
+
+    if (atom == None || pWin == NULL ||
+        dixLookupProperty(&prop, pWin, atom, serverClient,
+                          DixReadAccess) != Success ||
+        prop->format != format)
+        return NULL;
+    return prop;
+}
+
+/*
+ * The client window a top-level window shows: the first window below it,
+ * breadth first, with WM_STATE (a window manager's frame holds it), or
+ * the top-level window itself.
+ */
+static WindowPtr
+nbFrameClient(WindowPtr top)
+{
+    WindowPtr queue[64];
+    int head = 0, tail = 0;
+    WindowPtr w, c;
+
+    for (c = top->firstChild; c != NULL && tail < ARRAY_SIZE(queue);
+         c = c->nextSib)
+        queue[tail++] = c;
+    while (head < tail) {
+        w = queue[head++];
+        if (nbProperty(w, "WM_STATE", 32) != NULL)
+            return w;
+        for (c = w->firstChild; c != NULL && tail < ARRAY_SIZE(queue);
+             c = c->nextSib)
+            queue[tail++] = c;
+    }
+    return top;
+}
+
+/* WM_NORMAL_HINTS (ICCCM 4.1.2.3): what the client's size may be. */
+typedef struct nbSizeHints {
+    int min_w, min_h;           /* at least 1 */
+    int max_w, max_h;           /* 0: no maximum */
+    int base_w, base_h;         /* sizes are base + n * inc */
+    int inc_w, inc_h;           /* at least 1 */
+    Bool has_min;               /* PMinSize or PBaseSize */
+} nbSizeHints;
+
+#define NB_PMinSize     (1L << 4)
+#define NB_PMaxSize     (1L << 5)
+#define NB_PResizeInc   (1L << 6)
+#define NB_PBaseSize    (1L << 8)
+
+static void
+nbReadSizeHints(WindowPtr client, nbSizeHints *h)
+{
+    PropertyPtr prop = nbProperty(client, "WM_NORMAL_HINTS", 32);
+    const CARD32 *v = prop != NULL ? prop->data : NULL;
+    long flags = v != NULL && prop->size >= 15 ? (long) v[0] : 0;
+
+    memset(h, 0, sizeof(*h));
+    h->min_w = h->min_h = 1;
+    h->inc_w = h->inc_h = 1;
+    if ((flags & NB_PBaseSize) && prop->size >= 17) {
+        h->base_w = max((INT32) v[15], 0);
+        h->base_h = max((INT32) v[16], 0);
+    }
+    if (flags & NB_PMinSize) {
+        h->min_w = max((INT32) v[5], 1);
+        h->min_h = max((INT32) v[6], 1);
+        if (!(flags & NB_PBaseSize)) {
+            h->base_w = h->min_w;
+            h->base_h = h->min_h;
+        }
+    } else if ((flags & NB_PBaseSize) && prop->size >= 17) {
+        h->min_w = max(h->base_w, 1);
+        h->min_h = max(h->base_h, 1);
+    }
+    h->has_min = (flags & (NB_PMinSize | NB_PBaseSize)) != 0;
+    if (flags & NB_PMaxSize) {
+        h->max_w = max((INT32) v[7], 0);
+        h->max_h = max((INT32) v[8], 0);
+        if (h->max_w > 0)
+            h->max_w = max(h->max_w, h->min_w);
+        if (h->max_h > 0)
+            h->max_h = max(h->max_h, h->min_h);
+    }
+    if (flags & NB_PResizeInc) {
+        h->inc_w = max((INT32) v[9], 1);
+        h->inc_h = max((INT32) v[10], 1);
+    }
+}
+
+/* The largest size the hints allow up to `size` (or the minimum). */
+static int
+nbConstrain(int size, int min, int max, int base, int inc)
+{
+    if (max > 0 && size > max)
+        size = max;
+    if (size < min)
+        return min;
+    if (inc > 1 && size > base) {
+        size = base + (size - base) / inc * inc;
+        if (size < min)
+            size += inc;
+    }
+    return size;
+}
+
+/*
+ * What a top-level window has around its client (a window manager's
+ * title bar and borders), which resizing the frame leaves as it is: the
+ * window manager's _NET_FRAME_EXTENTS on the client, or else the frame's
+ * size minus the client's, borders included (which is off while the
+ * window manager hasn't laid out a frame we just resized).
+ */
+typedef struct nbDecoration {
+    WindowPtr client;
+    int w, h;                   /* frame minus client, borders included */
+    int bw;                     /* the client's border width */
+} nbDecoration;
+
+static void
+nbFrameDecoration(WindowPtr top, nbDecoration *d)
+{
+    PropertyPtr prop;
+    const CARD32 *v;
+
+    d->client = nbFrameClient(top);
+    d->bw = wBorderWidth(d->client);
+    if (d->client == top) {
+        d->w = d->h = 0;
+        return;
+    }
+    prop = nbProperty(d->client, "_NET_FRAME_EXTENTS", 32);
+    if (prop != NULL && prop->size >= 4) {
+        v = prop->data;
+        d->w = (int) min(v[0] + v[1], 4096u) + 2 * wBorderWidth(top);
+        d->h = (int) min(v[2] + v[3], 4096u) + 2 * wBorderWidth(top);
+        return;
+    }
+    d->w = max((int) top->drawable.width + 2 * wBorderWidth(top) -
+               ((int) d->client->drawable.width + 2 * d->bw), 0);
+    d->h = max((int) top->drawable.height + 2 * wBorderWidth(top) -
+               ((int) d->client->drawable.height + 2 * d->bw), 0);
+}
+
+/*
+ * The panel kinds of _NET_WM_WINDOW_TYPE: windows that float above the
+ * tiles, as a GNUstep app's panels and menus do.
+ */
+static Bool
+nbIsPanelType(Atom type)
+{
+    static const char *const panels[] = {
+        "_NET_WM_WINDOW_TYPE_DIALOG", "_NET_WM_WINDOW_TYPE_UTILITY",
+        "_NET_WM_WINDOW_TYPE_TOOLBAR", "_NET_WM_WINDOW_TYPE_SPLASH",
+        "_NET_WM_WINDOW_TYPE_MENU", "_NET_WM_WINDOW_TYPE_DROPDOWN_MENU",
+        "_NET_WM_WINDOW_TYPE_POPUP_MENU", "_NET_WM_WINDOW_TYPE_TOOLTIP",
+        "_NET_WM_WINDOW_TYPE_NOTIFICATION", "_NET_WM_WINDOW_TYPE_COMBO",
+        "_NET_WM_WINDOW_TYPE_DND",
+    };
+    size_t i;
+
+    for (i = 0; i < ARRAY_SIZE(panels); i++)
+        if (type == MakeAtom(panels[i], strlen(panels[i]), FALSE))
+            return TRUE;
+    return FALSE;
+}
+
+/*
+ * What window tiling needs to know of a top-level window (servers with
+ * WS_SERVER_TILING): WS_WINDOW_PANEL for override-redirect windows,
+ * transient windows (WM_TRANSIENT_FOR) and dialogs, menus and the like
+ * (_NET_WM_WINDOW_TYPE), and WS_WINDOW_FIXED_SIZE when the client's
+ * minimum and maximum size are the same.
+ */
+static uint32_t
+nbTilingFlags(WindowPtr pWin)
+{
+#ifdef WS_SERVER_TILING
+    WindowPtr client;
+    PropertyPtr prop;
+    nbSizeHints h;
+
+    if (!(nbScreenInfo.server_flags & WS_SERVER_TILING))
+        return 0;
+    if (pWin->overrideRedirect)
+        return WS_WINDOW_PANEL;
+    client = nbFrameClient(pWin);
+    if ((prop = nbProperty(client, "WM_TRANSIENT_FOR", 32)) != NULL &&
+        prop->size >= 1 && ((const CARD32 *) prop->data)[0] != None)
+        return WS_WINDOW_PANEL;
+    if ((prop = nbProperty(client, "_NET_WM_WINDOW_TYPE", 32)) != NULL &&
+        prop->size >= 1 && nbIsPanelType(((const CARD32 *) prop->data)[0]))
+        return WS_WINDOW_PANEL;
+    nbReadSizeHints(client, &h);
+    if (h.max_w > 0 && h.max_h > 0 && h.max_w == h.min_w &&
+        h.max_h == h.min_h)
+        return WS_WINDOW_FIXED_SIZE;
+#endif
+    return 0;
+}
+
 /*
  * Window levels, flags and pixel format. Override-redirect windows
  * (menus, tooltips, popups) float above normal windows, never become key
@@ -372,6 +595,7 @@ nbFrameStyle(WindowPtr pWin, Bool shaped, int32_t *level, uint32_t *flags,
         *format = WS_FORMAT_ARGB8888;
         *flags |= WS_WINDOW_OPAQUE;
     }
+    *flags |= nbTilingFlags(pWin);
 }
 
 /*
@@ -490,6 +714,8 @@ nbCreateFrame(RootlessWindowPtr pFrame, ScreenPtr pScreen, int newX,
 
     xorg_list_add(&frame->link, &nbScreenInfo.frames);
     pFrame->wid = frame;
+    /* Its size limits go to WindowServer before the server sleeps. */
+    nbScreenInfo.frames_dirty = TRUE;
     return TRUE;
 }
 
@@ -519,6 +745,7 @@ nbDestroyFrame(RootlessFrameID wid)
     RegionUninit(&frame->damage);
     RegionUninit(&frame->shape);
     free(frame->bits);
+    free(frame->title);
     free(frame);
 }
 
@@ -539,39 +766,78 @@ nbMoveFrame(RootlessFrameID wid, ScreenPtr pScreen, int newX, int newY)
 }
 
 /*
- * WindowServer moved a frame itself (WS_EVENT_WINDOW_FRAME): after a
- * screen change, it puts the windows that no longer fit back on the
- * screen. X follows, so that its window is where WindowServer shows it:
- * the top-level window moves as if its owner had moved it (the window
- * manager, for a frame of its own), and X clients and the window manager
- * see the ConfigureNotify. Should another client redirect the move (a
- * window manager, for a window that isn't its own), WindowServer is put
- * back where X still has the window until that client decides.
+ * WindowServer gave a frame a new place or size itself
+ * (WS_EVENT_WINDOW_FRAME): window tiling lays it out, or a screen that
+ * shrank puts it back on the screen. X follows, so that its window is
+ * where WindowServer shows it: the top-level window is moved and resized
+ * as if its owner did it (the window manager, for a frame of its own), so
+ * X clients and the window manager see the ConfigureNotify, and a window
+ * manager then lays its frame out again around the client.
+ *
+ * The client's WM_NORMAL_HINTS have the last word on its size: its
+ * minimum and maximum, and its resize increments (an xterm's character
+ * cells), with what the frame has around the client added. When that
+ * leaves X with another frame than WindowServer's (smaller than a tile,
+ * or a move another client redirected), WindowServer gets X's: tiling
+ * keeps a smaller window at its tile's top-left corner.
  */
 void
-nbFrameMovedByWindowServer(nbFrame *frame, const ws_rect_t *r)
+nbFrameSetByWindowServer(nbFrame *frame, const ws_rect_t *r)
 {
     WindowPtr pWin = nbFrameWindow(frame);
     ClientPtr owner;
-    XID vlist[2];
-    int x, y;
+    nbDecoration d;
+    nbSizeHints h;
+    XID vlist[4];
+    Mask mask = CWX | CWY;
+    int bw, cw, ch, w, hgt, x, y;
+    ws_rect_t now;
 
-    if (r->x == frame->x && r->y == frame->y)
+    if (r->x == frame->x && r->y == frame->y &&
+        (unsigned) r->width == frame->width &&
+        (unsigned) r->height == frame->height)
         return;
     frame->x = r->x;
     frame->y = r->y;
     if (pWin == NULL || pWin->parent == NULL)
         return;
 
+    bw = wBorderWidth(pWin);
     vlist[0] = (XID) (INT16) (r->x - pWin->parent->drawable.x);
     vlist[1] = (XID) (INT16) (r->y - pWin->parent->drawable.y);
+    if ((unsigned) r->width != frame->width ||
+        (unsigned) r->height != frame->height) {
+        nbFrameDecoration(pWin, &d);
+        nbReadSizeHints(d.client, &h);
+        cw = nbConstrain(r->width - d.w - 2 * d.bw, h.min_w, h.max_w,
+                         h.base_w, h.inc_w);
+        ch = nbConstrain(r->height - d.h - 2 * d.bw, h.min_h, h.max_h,
+                         h.base_h, h.inc_h);
+        w = cw + 2 * d.bw + d.w - 2 * bw;
+        hgt = ch + 2 * d.bw + d.h - 2 * bw;
+        if (w > 0 && hgt > 0 && (w != pWin->drawable.width ||
+                                 hgt != pWin->drawable.height)) {
+            vlist[2] = (XID) (CARD16) w;
+            vlist[3] = (XID) (CARD16) hgt;
+            mask |= CWWidth | CWHeight;
+        }
+    }
     owner = dixClientForWindow(pWin);
-    ConfigureWindow(pWin, CWX | CWY, vlist, owner ? owner : serverClient);
+    ConfigureWindow(pWin, mask, vlist, owner ? owner : serverClient);
 
+    /* Rootless resized the frame (nbResizeFrame) if X did; WindowServer
+       gets X's frame if it still differs. */
     x = pWin->drawable.x - wBorderWidth(pWin);
     y = pWin->drawable.y - wBorderWidth(pWin);
-    if (x != r->x || y != r->y)
-        nbMoveFrame(frame, pWin->drawable.pScreen, x, y);
+    w = pWin->drawable.width + 2 * wBorderWidth(pWin);
+    hgt = pWin->drawable.height + 2 * wBorderWidth(pWin);
+    if (x != r->x || y != r->y || w != r->width || hgt != r->height) {
+        frame->x = x;
+        frame->y = y;
+        now = nbRect(x, y, w, hgt);
+        if (ws_window_set_frame(nbConnection(), frame->wid, &now) < 0)
+            nbWindowServerLost("frame");
+    }
 }
 
 /*
@@ -651,6 +917,8 @@ nbResizeFrame(RootlessFrameID wid, ScreenPtr pScreen, int newX, int newY,
     frame->height = newH;
     /* The new frame goes with the first buffer at the new size. */
     r = nbRect(newX, newY, newW, newH);
+    /* What's around the client may have changed with it. */
+    nbScreenInfo.frames_dirty = TRUE;
     RegionEmpty(&frame->damage);
     nbFrameDamageAll(frame);
     nbFrameCommitWithFrame(frame, &r);
@@ -676,12 +944,14 @@ nbRestackFrame(RootlessFrameID wid, RootlessFrameID nextWid)
     nbFrame *frame = wid, *next = nextWid;
     int ok;
 
-    if (nbScreenInfo.hidden) {
-        /* Shown again, in X's stacking order, when XLibre.app unhides. */
+    if (nbScreenInfo.hidden || frame->minimized) {
+        /* Shown again, in X's stacking order, when XLibre.app unhides or
+           the window is restored. */
         if (!frame->ordered_in) {
             frame->ordered_in = TRUE;
             nbFrameDamageAll(frame);
             nbFrameCommit(frame);
+            nbScreenInfo.frames_dirty = TRUE;
         }
         return;
     }
@@ -696,9 +966,11 @@ nbRestackFrame(RootlessFrameID wid, RootlessFrameID nextWid)
     }
     if (!frame->ordered_in) {
         frame->ordered_in = TRUE;
-        /* First time on screen: show the whole buffer. */
+        /* First time on screen: show the whole buffer. It may have to
+           be minimized right away (nbFramesUpdate). */
         nbFrameDamageAll(frame);
         nbFrameCommit(frame);
+        nbScreenInfo.frames_dirty = TRUE;
     }
 }
 
@@ -753,6 +1025,8 @@ nbUnmapFrame(RootlessFrameID wid)
     if (!frame->ordered_in)
         return;
     frame->ordered_in = FALSE;
+    /* Ordering out also takes a minimized window out of the Dock. */
+    frame->minimized = FALSE;
     if (ws_window_order(nbConnection(), frame->wid, WS_ORDER_OUT, 0) < 0)
         nbWindowServerLost("order out");
     if (nbScreenInfo.pointer_frame == frame)
@@ -833,6 +1107,7 @@ nbSwitchWindow(RootlessWindowPtr pFrame, WindowPtr oldWin)
         frame->flags = flags;
         ws_window_set_flags(nbConnection(), frame->wid, flags);
     }
+    nbScreenInfo.frames_dirty = TRUE;
 }
 
 /*
@@ -882,7 +1157,8 @@ nbHideWindow(RootlessFrameID wid)
  * shown again. Hidden, every frame is ordered out on WindowServer while
  * its X window stays mapped, so X clients see no change; frame->ordered_in
  * keeps saying which frames X has on screen. Shown, those go back in X's
- * stacking order, bottom first, each on top of its level.
+ * stacking order, bottom first, each on top of its level. Minimized
+ * windows stay in the Dock either way.
  */
 static void
 nbFrameSetHidden(Bool hide)
@@ -897,7 +1173,7 @@ nbFrameSetHidden(Bool hide)
     nbScreenInfo.hidden = hide;
     if (hide) {
         xorg_list_for_each_entry(frame, &nbScreenInfo.frames, link)
-            if (frame->ordered_in &&
+            if (frame->ordered_in && !frame->minimized &&
                 ws_window_order(nbConnection(), frame->wid, WS_ORDER_OUT,
                                 0) < 0) {
                 nbWindowServerLost("hide");
@@ -911,7 +1187,7 @@ nbFrameSetHidden(Bool hide)
     for (pWin = pScreen->root->lastChild; pWin != NULL; pWin = pWin->prevSib) {
         winRec = WINREC(pWin);
         if (winRec == NULL || (frame = winRec->wid) == NULL ||
-            !frame->ordered_in)
+            !frame->ordered_in || frame->minimized)
             continue;
         if (ws_window_order(nbConnection(), frame->wid, WS_ORDER_ABOVE,
                             0) < 0) {
@@ -921,30 +1197,231 @@ nbFrameSetHidden(Bool hide)
         nbFrameDamageAll(frame);
         nbFrameCommit(frame);
     }
+    /* Windows minimized while we were hidden go to the Dock now. */
+    nbScreenInfo.frames_dirty = TRUE;
+}
+
+/* ---- minimizing and size limits ---- */
+
+/*
+ * Minimize or show the frame as the window manager's NB_MINIMIZED_ATOM on
+ * its top-level window says. Only frames X has on screen are minimized:
+ * WindowServer minimizes visible windows. On a WindowServer that can't
+ * minimize, the window is just ordered out until it is restored.
+ */
+static void
+nbFrameFollowMinimized(nbFrame *frame, WindowPtr pWin)
+{
+    PropertyPtr prop = nbProperty(pWin, NB_MINIMIZED_ATOM, 32);
+    uint32_t where = prop != NULL && prop->size >= 1 ?
+        ((const CARD32 *) prop->data)[0] : WS_MINIMIZE_DEFAULT;
+    Bool want = prop != NULL;
+    int ok;
+
+    if (want == frame->minimized || !frame->ordered_in)
+        return;
+    if (want) {
+        if (nbScreenInfo.hidden)
+            return;             /* when XLibre.app is shown again */
+        frame->minimized = TRUE;
+        if (nbScreenInfo.server_flags & WS_SERVER_MINIMIZE)
+            ok = ws_window_minimize_where(nbConnection(), frame->wid, where);
+        else
+            ok = ws_window_order(nbConnection(), frame->wid, WS_ORDER_OUT, 0);
+        if (nbScreenInfo.pointer_frame == frame)
+            nbScreenInfo.pointer_frame = NULL;
+    } else {
+        /* Ordering it in takes it out of the Dock. X's focus may still
+           be in it: make it key again (nbFocusCheck). */
+        frame->minimized = FALSE;
+        if (nbScreenInfo.x_focus_frame == frame)
+            nbScreenInfo.x_focus_frame = NULL;
+        ok = ws_window_order(nbConnection(), frame->wid,
+                             nbScreenInfo.hidden ? WS_ORDER_OUT :
+                             WS_ORDER_ABOVE, 0);
+        if (ok >= 0 && !nbScreenInfo.hidden) {
+            nbFrameDamageAll(frame);
+            nbFrameCommit(frame);
+        }
+    }
+    if (ok < 0)
+        nbWindowServerLost("minimize");
+}
+
+/*
+ * The window's title on WindowServer, which the Dock shows for minimized
+ * windows and in its window lists: the client's _NET_WM_NAME (UTF-8), or
+ * its WM_NAME when that is ASCII.
+ */
+static void
+nbFrameSendTitle(nbFrame *frame, WindowPtr pWin)
+{
+    WindowPtr client = nbFrameClient(pWin);
+    PropertyPtr prop = nbProperty(client, "_NET_WM_NAME", 8);
+    char title[256];            /* WindowServer's WS_MAX_TITLE */
+    size_t len, i;
+
+    if (prop == NULL) {
+        prop = nbProperty(client, "WM_NAME", 8);
+        for (i = 0; prop != NULL && i < (size_t) prop->size; i++)
+            if (((const unsigned char *) prop->data)[i] >= 0x80)
+                prop = NULL;
+    }
+    if (prop == NULL || prop->size == 0)
+        return;
+    len = min((size_t) prop->size, sizeof(title) - 1);
+    memcpy(title, prop->data, len);
+    title[len] = '\0';
+    if (frame->title != NULL && strcmp(frame->title, title) == 0)
+        return;
+    free(frame->title);
+    frame->title = strdup(title);
+    if (ws_window_set_title(nbConnection(), frame->wid, title) < 0)
+        nbWindowServerLost("title");
+}
+
+/*
+ * Tell window tiling the smallest and largest frame the window takes:
+ * the client's WM_NORMAL_HINTS with what is around it in the frame (the
+ * window manager's title bar and borders).
+ */
+static void
+nbFrameSendSizeLimits(nbFrame *frame, WindowPtr pWin)
+{
+#ifdef WS_SERVER_TILING
+    nbDecoration d;
+    nbSizeHints h;
+    uint32_t limits[4];
+    int extra_w, extra_h;
+
+    if (!(nbScreenInfo.server_flags & WS_SERVER_TILING))
+        return;
+    nbFrameDecoration(pWin, &d);
+    nbReadSizeHints(d.client, &h);
+    extra_w = d.w + 2 * d.bw;
+    extra_h = d.h + 2 * d.bw;
+    limits[0] = h.has_min ? (uint32_t) (h.min_w + extra_w) : 0;
+    limits[1] = h.has_min ? (uint32_t) (h.min_h + extra_h) : 0;
+    limits[2] = h.max_w > 0 ? (uint32_t) (h.max_w + extra_w) : 0;
+    limits[3] = h.max_h > 0 ? (uint32_t) (h.max_h + extra_h) : 0;
+    if (memcmp(limits, frame->limits, sizeof(limits)) == 0)
+        return;
+    memcpy(frame->limits, limits, sizeof(limits));
+    if (ws_window_set_size_limits(nbConnection(), frame->wid, limits[0],
+                                  limits[1], limits[2], limits[3]) < 0 &&
+        errno != ENOTSUP)
+        nbWindowServerLost("size limits");
+#endif
+}
+
+/*
+ * Before the server sleeps, after a window manager property changed (or
+ * a frame came, went on screen, or changed size): bring every frame's
+ * flags, title, size limits and minimized state up to date.
+ */
+void
+nbFramesUpdate(void)
+{
+    nbFrame *frame;
+    WindowPtr pWin;
+    int32_t level;
+    uint32_t flags, format;
+
+    if (!nbScreenInfo.frames_dirty || nbConnection() == NULL)
+        return;
+    nbScreenInfo.frames_dirty = FALSE;
+    xorg_list_for_each_entry(frame, &nbScreenInfo.frames, link) {
+        if ((pWin = nbFrameWindow(frame)) == NULL)
+            continue;
+        nbFrameStyle(pWin, frame->shaped, &level, &flags, &format);
+        if (flags != frame->flags) {
+            frame->flags = flags;
+            if (ws_window_set_flags(nbConnection(), frame->wid, flags) < 0) {
+                nbWindowServerLost("flags");
+                return;
+            }
+        }
+        nbFrameSendTitle(frame, pWin);
+        nbFrameSendSizeLimits(frame, pWin);
+        nbFrameFollowMinimized(frame, pWin);
+        if (nbConnection() == NULL)
+            return;
+    }
+}
+
+/*
+ * The user restored a minimized window from WindowServer (the Dock, its
+ * tile, the overview; WS_EVENT_WINDOW_RESTORE), which has activated us.
+ * Show it, drop NB_MINIMIZED_ATOM, and tell the window manager, which
+ * puts WM_STATE back to NormalState, raises the window and focuses it.
+ */
+void
+nbFrameRestoreRequested(nbFrame *frame)
+{
+    WindowPtr pWin = nbFrameWindow(frame);
+    ScreenPtr pScreen = screenInfo.screens[0];
+    Atom minimized = MakeAtom(NB_MINIMIZED_ATOM, strlen(NB_MINIMIZED_ATOM),
+                              FALSE);
+    xEvent ev;
+
+    if (pWin == NULL || !frame->minimized)
+        return;
+    if (minimized != None)
+        DeleteProperty(serverClient, pWin, minimized);
+    nbFrameFollowMinimized(frame, pWin);
+    if (pScreen == NULL || pScreen->root == NULL)
+        return;
+
+    memset(&ev, 0, sizeof(ev));
+    ev.u.u.type = ClientMessage;
+    ev.u.u.detail = 32;
+    ev.u.clientMessage.window = pWin->drawable.id;
+    ev.u.clientMessage.u.l.type = MakeAtom(NB_RESTORE_ATOM,
+                                           strlen(NB_RESTORE_ATOM), TRUE);
+    ev.u.clientMessage.u.l.longs0 = pWin->drawable.id;
+    DeliverEventsToWindow(inputInfo.pointer, pScreen->root, &ev, 1,
+                          SubstructureRedirectMask, NullGrab);
 }
 
 /*
  * Watch ChangeProperty and DeleteProperty of NB_HIDDEN_ATOM on the root
- * window, which is how XLibre.app's window manager says hide and show.
- * The request itself goes ahead, so the property shows the state.
+ * window, which is how XLibre.app's window manager says hide and show,
+ * and of the properties that make a frame's style, size limits and
+ * minimized state, which are looked at again before the server sleeps
+ * (the filter runs before the change). The request itself goes ahead,
+ * so the property shows the state.
  */
 static void
 nbPropertyFilter(CallbackListPtr *pcbl, void *unused, void *calldata)
 {
+    static const char *const watched[] = {
+        NB_MINIMIZED_ATOM, "WM_NORMAL_HINTS", "WM_TRANSIENT_FOR",
+        "_NET_WM_WINDOW_TYPE", "WM_STATE", "WM_NAME", "_NET_WM_NAME",
+        "_NET_FRAME_EXTENTS",
+    };
     PropertyFilterParam *p = calldata;
     ScreenPtr pScreen = screenInfo.screens[0];
     Atom hidden;
+    size_t i;
 
     if (p->skip || pScreen == NULL || pScreen->root == NULL ||
-        p->window != pScreen->root->drawable.id || p->atoms != NULL)
+        p->atoms != NULL ||
+        (p->access_mode != DixWriteAccess &&
+         p->access_mode != DixRemoveAccess))
         return;
+    if (p->window != pScreen->root->drawable.id) {
+        for (i = 0; i < ARRAY_SIZE(watched); i++)
+            if (p->property == MakeAtom(watched[i], strlen(watched[i]),
+                                        FALSE))
+                nbScreenInfo.frames_dirty = TRUE;
+        return;
+    }
     hidden = MakeAtom(NB_HIDDEN_ATOM, strlen(NB_HIDDEN_ATOM), FALSE);
     if (hidden == None || p->property != hidden)
         return;
     if (p->access_mode == DixRemoveAccess) {
         nbFrameSetHidden(FALSE);
-    } else if (p->access_mode == DixWriteAccess && p->format == 32 &&
-               p->len >= 1 && p->value != NULL &&
+    } else if (p->format == 32 && p->len >= 1 && p->value != NULL &&
                p->mode == PropModeReplace) {
         nbFrameSetHidden(((const CARD32 *) p->value)[0] != 0);
     }

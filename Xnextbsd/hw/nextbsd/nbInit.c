@@ -259,6 +259,7 @@ nbBlockHandler(void *data, void *timeout)
 {
     if (nbScreenInfo.conn == NULL)
         return;
+    nbFramesUpdate();
     nbFocusCheck();
     nbUsableAreaPublish();
     if (ws_pending(nbScreenInfo.conn)) {

@@ -159,6 +159,20 @@
 - (XCBWindow*) rootWindowForScreenNumber:(int)number;
 - (xcb_window_t*) clientList;
 
+/*** MINIMIZING ON WINDOWSERVER ***/
+
+// Minimize a window (a frame, its title bar or its client) into
+// WindowServer, where the user's NBMinimizeStyle says (the Dock by
+// default), through Xnextbsd; the X windows stay mapped, so the Dock's
+// preview is live. WM_STATE becomes IconicState and _NET_WM_STATE gets
+// _NET_WM_STATE_HIDDEN.
+- (void)minimizeWindowIntoWindowServer:(XCBWindow *)aWindow;
+// Show a minimized window again: WM_STATE NormalState, raised and
+// focused, and XLibre active when `activate` says so (WindowServer has
+// already activated it when the user restored the window there), and
+// shown if it was hidden.
+- (void)restoreMinimizedWindow:(XCBWindow *)aWindow activate:(BOOL)activate;
+
 /*** WINDOW TILING ***/
 
 - (void)centerFrame:(XCBFrame *)frame;
