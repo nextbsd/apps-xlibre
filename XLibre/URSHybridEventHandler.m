@@ -256,7 +256,9 @@
 
         [connection flush];
         
-        // Recalculate workarea after scanning all existing windows for struts
+        // Recalculate workarea after scanning all existing windows for struts,
+        // inside WindowServer's usable area
+        [self.workareaManager refreshUsableArea];
         [self.workareaManager recalculateWorkarea];
         
     } @catch (NSException *exception) {
@@ -648,6 +650,15 @@
         }
         case XCB_PROPERTY_NOTIFY: {
             xcb_property_notify_event_t *propEvent = (xcb_property_notify_event_t *)event;
+            // The root window's properties: only WindowServer's usable area
+            // (_XNEXTBSD_USABLE_AREA, set by Xnextbsd) is of interest.
+            XCBScreen *propScreen = [[connection screens] firstObject];
+            if (propScreen && propEvent->window == [propScreen screen]->root) {
+                if ([self.workareaManager isUsableAreaPropertyEvent:propEvent] &&
+                    [self.workareaManager refreshUsableArea])
+                    [self.workareaManager recalculateWorkarea];
+                break;
+            }
             // Check if this is a strut property change
             [self.workareaManager handleStrutPropertyChange:propEvent];
             [self handleWindowTitlePropertyChange:propEvent];
@@ -722,39 +733,12 @@
 
     [screen setWidth:newW];
     [screen setHeight:newH];
+    // Most of the window manager reads the size from the connection setup's
+    // screen, so that has to follow too.
+    [screen screen]->width_in_pixels = newW;
+    [screen screen]->height_in_pixels = newH;
 
     xcb_connection_t *conn = [connection connection];
-
-    // Reposition windows that extend beyond the new screen bounds
-    for (NSNumber *key in [connection windowsMap]) {
-        XCBWindow *w = [connection windowForXCBId:[key unsignedIntValue]];
-        if (!w) continue;
-        if ([w isKindOfClass:[XCBFrame class]] || ![w decorated]) {
-            XCBRect r = [w windowRect];
-            BOOL moved = NO;
-            if (r.position.x + (int16_t)r.size.width > (int16_t)newW) {
-                r.position.x = (int16_t)newW - (int16_t)r.size.width - 10;
-                moved = YES;
-            }
-            if (r.position.y + (int16_t)r.size.height > (int16_t)newH) {
-                r.position.y = (int16_t)newH - (int16_t)r.size.height - 10;
-                moved = YES;
-            }
-            if (r.position.x < 0) { r.position.x = 0; moved = YES; }
-            if (r.position.y < 0) { r.position.y = 0; moved = YES; }
-            if (moved) {
-                uint32_t vals[2] = {(uint32_t)r.position.x, (uint32_t)r.position.y};
-                xcb_configure_window(conn, [w window],
-                                     XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, vals);
-                [w setWindowRect:r];
-            }
-        }
-    }
-
-    [connection flush];
-
-    // Invalidate workarea cache so it is recalculated on next query
-    connection.workareaValid = NO;
 
     // Update _NET_DESKTOP_GEOMETRY
     {
@@ -770,9 +754,75 @@
                                withData:geom];
     }
 
-    // Recalculate workarea (updates _NET_WORKAREA from new screen dims)
+    // The workarea: the new screen, and WindowServer's usable area on it
+    // (Xnextbsd has it on the root window by the time this event comes).
+    [self.workareaManager refreshUsableArea];
     [self.workareaManager recalculateWorkarea];
+    connection.workareaValid = NO;
 
+    // Frames that no longer fit on the screen move back into the usable
+    // area, as NSWindow's constrainFrameRect:toScreen: keeps windows on a
+    // screen that shrank; frames still on the screen stay where they are.
+    // WindowServer has already moved the ones that didn't fit just onto
+    // the new screen (Xnextbsd moves the X window to match, and that
+    // ConfigureNotify comes after this event), so a frame is moved when
+    // either where it was (the cached rect) or where it is now (asked for
+    // again) doesn't fit, and it is moved from where it is now.
+    NSRect area = [self.workareaManager currentWorkarea];
+    int areaX = (int)area.origin.x, areaY = (int)area.origin.y;
+    int areaR = areaX + (int)area.size.width, areaB = areaY + (int)area.size.height;
+    xcb_query_tree_reply_t *tree = xcb_query_tree_reply(conn,
+        xcb_query_tree(conn, [screen screen]->root), NULL);
+    if (tree) {
+        xcb_window_t *children = xcb_query_tree_children(tree);
+        int n = xcb_query_tree_children_length(tree);
+        for (int i = 0; i < n; i++) {
+            XCBWindow *w = [connection windowForXCBId:children[i]];
+            if (!w || !([w isKindOfClass:[XCBFrame class]] || ![w decorated]))
+                continue;
+            // Frames, shown or not; other windows of ours only when they are
+            // shown and managed (not the window manager's own helpers).
+            if (![w isKindOfClass:[XCBFrame class]]) {
+                xcb_get_window_attributes_reply_t *a = xcb_get_window_attributes_reply(
+                    conn, xcb_get_window_attributes(conn, children[i]), NULL);
+                BOOL shown = a && a->map_state == XCB_MAP_STATE_VIEWABLE &&
+                             !a->override_redirect;
+                free(a);
+                if (!shown) continue;
+            }
+            xcb_get_geometry_reply_t *g = xcb_get_geometry_reply(conn,
+                xcb_get_geometry(conn, children[i]), NULL);
+            if (!g) continue;
+            int x = g->x, y = g->y;
+            int width = g->width + 2 * g->border_width;
+            int height = g->height + 2 * g->border_width;
+            free(g);
+            XCBRect was = [w windowRect];
+            BOOL fitsNow = x >= 0 && y >= 0 && x + width <= newW && y + height <= newH;
+            BOOL fitted = was.position.x >= 0 && was.position.y >= 0 &&
+                          was.position.x + (int)was.size.width <= newW &&
+                          was.position.y + (int)was.size.height <= newH;
+            if (fitsNow && fitted)
+                continue;
+            int nx = x, ny = y;
+            if (nx + width > areaR) nx = areaR - width;
+            if (nx < areaX) nx = areaX;
+            if (ny + height > areaB) ny = areaB - height;
+            if (ny < areaY) ny = areaY;
+            if (nx == x && ny == y)
+                continue;
+            uint32_t vals[2] = {(uint32_t)(int32_t)nx, (uint32_t)(int32_t)ny};
+            xcb_configure_window(conn, children[i],
+                                 XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, vals);
+            XCBRect r = [w windowRect];
+            r.position.x = (int16_t)nx;
+            r.position.y = (int16_t)ny;
+            [w setWindowRect:r];
+        }
+        free(tree);
+    }
+
+    [connection flush];
 }
 
 - (void)handleExtensionEvent:(xcb_generic_event_t*)event

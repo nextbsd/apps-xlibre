@@ -172,8 +172,23 @@ nbConnect(void)
     nbScreenInfo.height = si->height;
     nbScreenInfo.mm_width = si->mm_width;
     nbScreenInfo.mm_height = si->mm_height;
+    nbScreenInfo.refresh_mhz = si->refresh_mhz;
+    snprintf(nbScreenInfo.screen_name, sizeof(nbScreenInfo.screen_name),
+             "%.*s", (int) sizeof(si->name), si->name);
     xorg_list_init(&nbScreenInfo.frames);
     nbScreenInfo.server_flags = ws_server_flags(nbScreenInfo.conn);
+
+    /* Put on the root window once there is one (nbBlockHandler). */
+    {
+        ws_rect_t usable = { 0, 0, 0, 0 };
+
+#ifdef WS_SERVER_USABLE_AREA
+        if (ws_usable_area(nbScreenInfo.conn, &usable) < 0)
+            usable.width = usable.height = 0;
+#endif
+        nbScreenInfo.usable_dirty = TRUE;
+        nbUsableAreaChanged(&usable);
+    }
 
     LogMessageVerb(X_INFO, 0, "Xnextbsd: connected to WindowServer as "
                    "client %u (app %u), screen %ux%u, server flags 0x%x\n",
@@ -245,6 +260,7 @@ nbBlockHandler(void *data, void *timeout)
     if (nbScreenInfo.conn == NULL)
         return;
     nbFocusCheck();
+    nbUsableAreaPublish();
     if (ws_pending(nbScreenInfo.conn)) {
         nbInputDrain();
         AdjustWaitForDelay(timeout, 0);
@@ -306,6 +322,8 @@ nbScreenInit(ScreenPtr pScreen, int argc, char **argv)
     if (!nbCursorInit(pScreen))
         return FALSE;
     nbInputScreenInit(pScreen);
+    if (!nbRandRInit(pScreen))
+        return FALSE;
 
     if (!fbCreateDefColormap(pScreen))
         return FALSE;

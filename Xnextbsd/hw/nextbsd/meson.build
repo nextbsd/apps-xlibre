@@ -4,6 +4,7 @@ srcs = [
     'nbFrame.c',
     'nbInit.c',
     'nbInput.c',
+    'nbRandR.c',
     '../../mi/miinitext.c',
     '../../mi/miinitext.h',
     '../stubs/ddxBeforeReset.c',

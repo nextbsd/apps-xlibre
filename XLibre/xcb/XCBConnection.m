@@ -729,24 +729,54 @@ static XCBConnection *sharedInstance;
     rootWindow = nil;
 }
 
+- (XCBRect) placementArea
+{
+    XCBScreen *screen = [screens firstObject];
+
+    [self ensureWorkareaCache:nil];
+    if (self.workareaValid && _cachedWorkareaWidth > 0 &&
+        _cachedWorkareaHeight > 0)
+        return XCBMakeRect(XCBMakePoint(_cachedWorkareaX, _cachedWorkareaY),
+                           XCBMakeSize(_cachedWorkareaWidth,
+                                       _cachedWorkareaHeight));
+    return XCBMakeRect(XCBMakePoint(0, 0),
+                       XCBMakeSize(screen ? [screen screen]->width_in_pixels : 0,
+                                   screen ? [screen screen]->height_in_pixels : 0));
+}
+
+- (void) dialogPositionForWidth:(uint16_t)width height:(uint16_t)height
+                              x:(int16_t *)x y:(int16_t *)y
+{
+    XCBRect area = [self placementArea];
+
+    *x = (int16_t)(area.position.x + ((int)area.size.width - (int)width) / 2);
+    *y = (int16_t)(area.position.y +
+                   ((int)area.size.height - (int)height) * 0.381966);
+    if (*x < area.position.x)
+        *x = area.position.x;
+    if (*y < area.position.y)
+        *y = area.position.y;
+}
+
 // Cascade: the placement point first, then one step down and right for
 // each window already at a step (CASCADE_STEP, about a title bar), as
-// NSWindow's cascadeTopLeftFromPoint: does. When a window would leave the
-// screen, a new column starts further right; when those run out too, it
-// goes back to the placement point.
+// NSWindow's cascadeTopLeftFromPoint: does. All of it inside the placement
+// area (the usable area, without the Dock's strip): the placement point
+// moves into it, and when a window would leave it, a new column starts
+// further right; when those run out too, it goes back to the placement
+// point.
 #define CASCADE_STEP 24
 
 - (void) cascadePositionForWidth:(uint16_t)width height:(uint16_t)height
                                x:(int16_t *)x y:(int16_t *)y
 {
     NSMutableSet *taken = [NSMutableSet set];
-    int screenW = 0, screenH = 0, column, step, cx, px, py;
-
-    if ([[self screens] count] > 0) {
-        xcb_screen_t *s = [[[self screens] objectAtIndex:0] screen];
-        screenW = s->width_in_pixels;
-        screenH = s->height_in_pixels;
-    }
+    XCBRect area = [self placementArea];
+    int left = area.position.x, top = area.position.y;
+    int right = left + area.size.width, bottom = top + area.size.height;
+    int startX = MAX((int)self.placementX, left);
+    int startY = MAX((int)self.placementY, top);
+    int column, step, cx, px, py;
 
     // Top-left corners of the frames now on screen.
     for (XCBWindow *w in [windowsMap allValues]) {
@@ -761,14 +791,14 @@ static XCBConnection *sharedInstance;
     }
 
     for (column = 0; ; column++) {
-        cx = self.placementX + column * CASCADE_STEP * 8;
-        if (column > 0 && (screenW <= 0 || cx + width > screenW))
+        cx = startX + column * CASCADE_STEP * 8;
+        if (column > 0 && (right <= left || cx + width > right))
             break;
         for (step = 0; ; step++) {
             px = cx + step * CASCADE_STEP;
-            py = self.placementY + step * CASCADE_STEP;
-            if (step > 0 && (screenH <= 0 || py + height > screenH ||
-                             px + width > screenW))
+            py = startY + step * CASCADE_STEP;
+            if (step > 0 && (bottom <= top || py + height > bottom ||
+                             px + width > right))
                 break;
             if (![taken containsObject:
                       [NSString stringWithFormat:@"%d,%d", px, py]]) {
@@ -778,8 +808,8 @@ static XCBConnection *sharedInstance;
             }
         }
     }
-    *x = self.placementX;
-    *y = self.placementY;
+    *x = (int16_t)startX;
+    *y = (int16_t)startY;
 }
 
 - (void)handleMapRequest:(xcb_map_request_event_t *)anEvent
@@ -1132,8 +1162,8 @@ static XCBConnection *sharedInstance;
                             int16_t xPos, yPos;
                             if (isDialog) {
                                 // Dialogs: centered horizontally, golden ratio vertically
-                                xPos = (screenWidth - reqW) / 2;
-                                yPos = (screenHeight - reqH) * 0.381966;
+                                [self dialogPositionForWidth:reqW height:reqH
+                                                            x:&xPos y:&yPos];
                                 //NSLog(@"[MapRequest] Applying golden ratio placement (undecorated) for dialog window %u: %d, %d", [window window], xPos, yPos);
                             } else {
                                 // Other windows: the placement offset
@@ -1157,8 +1187,8 @@ static XCBConnection *sharedInstance;
                         int16_t xPos, yPos;
                         if (isDialog) {
                             // Dialogs: centered horizontally, golden ratio vertically
-                            xPos = (screenWidth - reqW) / 2;
-                            yPos = (screenHeight - reqH) * 0.381966;
+                            [self dialogPositionForWidth:reqW height:reqH
+                                                        x:&xPos y:&yPos];
                             //NSLog(@"[MapRequest] Applying golden ratio placement (undecorated) for dialog window %u: %d, %d", [window window], xPos, yPos);
                         } else {
                             // Other windows: the placement offset
@@ -1659,13 +1689,10 @@ static XCBConnection *sharedInstance;
     //NSLog(@"[MapRequest] Requested position for window %u: %d, %d (size %ux%u)", [window window], xPos, yPos, winWidth, winHeight);
 
     if (shouldReposition && screen) {
-        uint16_t screenWidth = [screen screen]->width_in_pixels;
-        uint16_t screenHeight = [screen screen]->height_in_pixels;
-
         if (isDialog) {
             // Dialogs: centered horizontally, golden ratio vertically
-            xPos = (screenWidth - winWidth) / 2;
-            yPos = (screenHeight - winHeight) * 0.381966; // Golden ratio from top
+            [self dialogPositionForWidth:winWidth height:winHeight
+                                        x:&xPos y:&yPos];
             //NSLog(@"[MapRequest] Applying golden ratio placement for dialog window %u: %d, %d", [window window], xPos, yPos);
         } else {
             // Other windows: the placement offset
@@ -1961,6 +1988,23 @@ static XCBConnection *sharedInstance;
 {
     // NSLog(@"In configure notify for window %u: %d, %d", anEvent->window, anEvent->x, anEvent->y);
 
+    // A frame moved by someone else: Xnextbsd, following WindowServer when
+    // it puts a window back on a screen that shrank. Keep the cached
+    // position in step (not while a drag or resize of ours is going on,
+    // whose own moves are already cached).
+    XCBScreen *rootScreen = [screens firstObject];
+    if (dragState || resizeState || rootScreen == nil ||
+        anEvent->event != [rootScreen screen]->root)
+        return;
+    XCBWindow *window = [self windowForXCBId:anEvent->window];
+    if (![window isKindOfClass:[XCBFrame class]])
+        return;
+    XCBRect r = [window windowRect];
+    if (r.position.x == anEvent->x && r.position.y == anEvent->y)
+        return;
+    r.position.x = anEvent->x;
+    r.position.y = anEvent->y;
+    [window setWindowRect:r];
 }
 
 - (void)handleMotionNotify:(xcb_motion_notify_event_t *)anEvent
@@ -3515,7 +3559,9 @@ static XCBConnection *sharedInstance;
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
 
     uint32_t values[1];
-    values[0] = XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT | XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY;
+    // PropertyChange: Xnextbsd's _XNEXTBSD_USABLE_AREA (URSWorkareaManager).
+    values[0] = XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT | XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
+                XCB_EVENT_MASK_PROPERTY_CHANGE;
     XCBWindow *rootWindow = [[XCBWindow alloc] initWithXCBWindow:[[screen rootWindow] window] andConnection:self];
 
     if (replace)

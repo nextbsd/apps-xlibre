@@ -23,5 +23,7 @@ nextbsd-xlibre      7b084e8a7230ffaaef87140be8d0084b2a60e6ca  77243026ceb2976d48
 # publishes no artifact yet. On a NextBSD system the installed library is
 # used. This commit has the X server protocol (apps-windowserver#4-#7:
 # joining an app, the keymap and XKB state, XRGB8888 buffers, restack
-# notices), which Xnextbsd uses when the WindowServer it runs on has it.
-apps-windowserver   04cb4c5b14e0e1d27d350754d75c83034d24a8a9  842eaabf80c1231800e2609f6b9ba1681c09669c99ca96274a0267315e41f4c2  https://github.com/nextbsd/apps-windowserver/archive/04cb4c5b14e0e1d27d350754d75c83034d24a8a9.tar.gz
+# notices) and the screen events (apps-windowserver#30: screen changes and
+# the usable area), which Xnextbsd uses when the WindowServer it runs on
+# has them.
+apps-windowserver   fd05191fe8732ba03ddc52626f1649bfa2d4a17c  71ffb96145bb59f648e1d96bbc86dd6bac45fc53d5a0d5a2770303bfccedefa7  https://github.com/nextbsd/apps-windowserver/archive/fd05191fe8732ba03ddc52626f1649bfa2d4a17c.tar.gz

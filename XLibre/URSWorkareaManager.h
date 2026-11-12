@@ -21,4 +21,10 @@
 - (void)recalculateWorkarea;
 - (NSRect)currentWorkarea;
 
+// WindowServer's usable area, _XNEXTBSD_USABLE_AREA on the root window.
+// refreshUsableArea reads it again and says whether it changed; call
+// recalculateWorkarea after.
+- (BOOL)isUsableAreaPropertyEvent:(xcb_property_notify_event_t *)event;
+- (BOOL)refreshUsableArea;
+
 @end
