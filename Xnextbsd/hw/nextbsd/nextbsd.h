@@ -39,13 +39,30 @@
 #include "rootless.h"
 
 /*
+ * A WindowServer buffer of a frame. WindowServer reads it while it is
+ * attached (and until it hands it back), so X only writes to one it
+ * doesn't hold.
+ */
+typedef struct nbBuffer {
+    ws_buffer_t *ws;            /* NULL until first needed */
+    Bool busy;                  /* attached, or not handed back yet */
+    RegionRec stale;            /* frame-local: where it lags the backing */
+} nbBuffer;
+
+#define NB_NBUFFERS 2
+
+/*
  * One WindowServer window per top-level X window: rootless calls it a
  * frame. The RootlessFrameID handed to rootless is a pointer to this.
  */
 typedef struct nbFrame {
     struct xorg_list link;      /* nbScreen.frames */
     uint32_t wid;               /* WindowServer window id */
-    ws_buffer_t *buffer;        /* the shared pixels rootless draws into */
+    char *bits;                 /* the backing rootless draws into */
+    unsigned int stride;        /* bytes per row of bits */
+    nbBuffer buffers[NB_NBUFFERS];
+    Bool frame_pending;         /* committed, WS_EVENT_FRAME_DONE not in */
+    Bool commit_wanted;         /* damage waits for FRAME_DONE or a buffer */
     int x, y;                   /* screen position, border included */
     unsigned int width, height;
     int32_t level;              /* WS_LEVEL_* */
@@ -88,6 +105,8 @@ Bool nbFrameInit(ScreenPtr pScreen);
 nbFrame *nbFrameFromWID(uint32_t wid);
 WindowPtr nbFrameWindow(nbFrame *frame);
 void nbFrameOrdered(nbFrame *frame, const ws_event_ordered_t *ordered);
+void nbFrameDone(nbFrame *frame);
+void nbFrameBufferReleased(nbFrame *frame, uint32_t buffer_id);
 
 /*
  * The window manager's channel to the server, a property on the root

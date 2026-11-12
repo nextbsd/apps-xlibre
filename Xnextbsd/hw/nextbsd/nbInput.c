@@ -782,11 +782,20 @@ nbHandleEvent(ws_connection_t *conn, const ws_event_t *ev, void *context)
                strerror(ev->u.error.code));
         break;
 
+    case WS_EVENT_BUFFER_RELEASE:
+        frame = nbFrameFromWID(ev->hdr.window);
+        if (frame != NULL)
+            nbFrameBufferReleased(frame, ev->u.buffer.buffer_id);
+        break;
+
+    case WS_EVENT_FRAME_DONE:
+        frame = nbFrameFromWID(ev->hdr.window);
+        if (frame != NULL)
+            nbFrameDone(frame);
+        break;
+
     case WS_EVENT_WINDOW_FRAME:
         /* WindowServer moves only icon windows itself; we have none. */
-    case WS_EVENT_BUFFER_RELEASE:
-        /* Buffers are destroyed when replaced (single buffered). */
-    case WS_EVENT_FRAME_DONE:
     default:
         break;
     }

@@ -30,16 +30,26 @@
  */
 
 /*
- * Each top-level X window is one WindowServer window with one shared
- * ARGB8888 buffer, which rootless draws into directly (StartDrawing hands
- * it the buffer's pixels and stride). Rootless reports what it drew with
- * DamageRects and asks for it to be shown with StopDrawing(flush) or
- * UpdateRegion, at most every ROOTLESS_REDISPLAY_DELAY ms; that is when
- * the damage goes to WindowServer and the window is committed.
+ * Each top-level X window is one WindowServer window. Rootless draws into
+ * a private backing (StartDrawing hands it the pixels and stride), reports
+ * what it drew with DamageRects, and asks for it to be shown with
+ * StopDrawing(flush) or UpdateRegion, at most every
+ * ROOTLESS_REDISPLAY_DELAY ms.
  *
- * WindowServer composites straight from the buffer, so a frame it
- * composites while X is still drawing can tear. Double buffering is
- * apps-xlibre#4.
+ * WindowServer composites straight from a window's attached buffer, so X
+ * never draws into that one. Showing the damage (nbFrameCommit) takes a
+ * buffer WindowServer doesn't hold, copies into it from the backing what
+ * changed since that buffer was last brought up to date (its stale
+ * region), attaches it and commits. WindowServer hands the previous
+ * buffer back (WS_EVENT_BUFFER_RELEASE), and the next commit uses that
+ * one: two buffers per window, as Xwayland's xwayland-window-buffers.c
+ * does.
+ *
+ * Commits are paced by WindowServer's frames: each asks for
+ * WS_EVENT_FRAME_DONE, and until it comes, damage just accumulates and is
+ * committed in one go when it does (nbFrameDone). A window drawing faster
+ * than the screen refreshes costs one copy per frame shown, not one per
+ * redisplay.
  */
 
 #include <dix-config.h>
@@ -103,19 +113,121 @@ nbBufferCreate(unsigned int width, unsigned int height, uint32_t format)
     return buffer;
 }
 
+/* The backing, at least 1x1 like the buffers. */
+static Bool
+nbBackingAlloc(nbFrame *frame, unsigned int width, unsigned int height)
+{
+    unsigned int stride = (width ? width : 1) * 4;
+
+    frame->bits = calloc(height ? height : 1, stride);
+    if (frame->bits == NULL) {
+        ErrorF("Xnextbsd: can't allocate a %ux%u window backing\n",
+               width, height);
+        return FALSE;
+    }
+    frame->stride = stride;
+    return TRUE;
+}
+
+/* Drop the WindowServer buffers (it keeps its own reference to the one
+   it shows until another is attached). */
+static void
+nbBuffersDestroy(nbFrame *frame)
+{
+    int i;
+
+    for (i = 0; i < NB_NBUFFERS; i++) {
+        if (frame->buffers[i].ws != NULL && nbConnection() != NULL)
+            ws_buffer_destroy(nbConnection(), frame->buffers[i].ws);
+        frame->buffers[i].ws = NULL;
+        frame->buffers[i].busy = FALSE;
+        RegionEmpty(&frame->buffers[i].stale);
+    }
+}
+
+/* Copy a frame-local region of the backing into a buffer. */
+static void
+nbBufferUpdate(nbFrame *frame, nbBuffer *buf, RegionPtr region)
+{
+    char *dst = ws_buffer_data(buf->ws);
+    unsigned int dstride = ws_buffer_stride(buf->ws);
+    const BoxRec *box = RegionRects(region);
+    int i, n = RegionNumRects(region), y;
+    size_t len;
+
+    for (i = 0; i < n; i++) {
+        BoxRec b = {
+            max(box[i].x1, 0), max(box[i].y1, 0),
+            min(box[i].x2, (int) frame->width),
+            min(box[i].y2, (int) frame->height),
+        };
+
+        if (b.x1 >= b.x2 || b.y1 >= b.y2)
+            continue;
+        len = (size_t) (b.x2 - b.x1) * 4;
+        for (y = b.y1; y < b.y2; y++)
+            memcpy(dst + (size_t) y * dstride + b.x1 * 4,
+                   frame->bits + (size_t) y * frame->stride + b.x1 * 4, len);
+    }
+}
+
 /*
- * Send the frame's damage and commit, so WindowServer recomposites what
- * changed. With nothing damaged there is nothing to do.
+ * A buffer WindowServer doesn't hold, made the first time it is needed
+ * (all stale then), or NULL if both are held.
+ */
+static nbBuffer *
+nbFrameFreeBuffer(nbFrame *frame)
+{
+    BoxRec all = { 0, 0, frame->width, frame->height };
+    nbBuffer *buf;
+    int i;
+
+    for (i = 0; i < NB_NBUFFERS; i++) {
+        buf = &frame->buffers[i];
+        if (buf->busy)
+            continue;
+        if (buf->ws == NULL) {
+            buf->ws = nbBufferCreate(frame->width, frame->height,
+                                     frame->format);
+            if (buf->ws == NULL)
+                continue;
+            RegionReset(&buf->stale, &all);
+        }
+        return buf;
+    }
+    return NULL;
+}
+
+/*
+ * Show the frame's damage: bring a free buffer up to date, attach it,
+ * send the damage and commit, asking for WS_EVENT_FRAME_DONE. While the
+ * last commit's frame isn't done, or WindowServer holds both buffers,
+ * the damage waits (commit_wanted) and goes with the next commit.
+ * With nothing damaged there is nothing to do.
  */
 static void
 nbFrameCommit(nbFrame *frame)
 {
     ws_rect_t rects[NB_MAX_DAMAGE_RECTS];
     const BoxRec *box;
+    nbBuffer *buf;
     int i, n;
 
     if (frame->wid == 0 || !RegionNotEmpty(&frame->damage))
         return;
+    if (frame->frame_pending || (buf = nbFrameFreeBuffer(frame)) == NULL) {
+        frame->commit_wanted = TRUE;
+        return;
+    }
+    frame->commit_wanted = FALSE;
+
+    /* Every buffer now lags the backing where it was drawn. */
+    for (i = 0; i < NB_NBUFFERS; i++)
+        if (frame->buffers[i].ws != NULL)
+            RegionUnion(&frame->buffers[i].stale, &frame->buffers[i].stale,
+                        &frame->damage);
+    nbBufferUpdate(frame, buf, &buf->stale);
+    RegionEmpty(&buf->stale);
 
     n = RegionNumRects(&frame->damage);
     box = RegionRects(&frame->damage);
@@ -128,9 +240,43 @@ nbFrameCommit(nbFrame *frame)
                           box[i].y2 - box[i].y1);
     RegionEmpty(&frame->damage);
 
-    if (ws_window_damage(nbConnection(), frame->wid, rects, n) < 0 ||
-        ws_window_commit(nbConnection(), frame->wid, 0) < 0)
+    if (ws_window_attach(nbConnection(), frame->wid, buf->ws) < 0 ||
+        ws_window_damage(nbConnection(), frame->wid, rects, n) < 0 ||
+        ws_window_commit(nbConnection(), frame->wid,
+                         WS_COMMIT_FRAME_DONE) < 0) {
         nbWindowServerLost("commit");
+        return;
+    }
+    /* The other buffer, if it was attached, comes back with
+       WS_EVENT_BUFFER_RELEASE. */
+    buf->busy = TRUE;
+    frame->frame_pending = TRUE;
+}
+
+/* WindowServer showed the last commit: commit what accumulated since. */
+void
+nbFrameDone(nbFrame *frame)
+{
+    frame->frame_pending = FALSE;
+    if (frame->commit_wanted)
+        nbFrameCommit(frame);
+}
+
+/* WindowServer no longer reads this buffer: X may draw into it again. */
+void
+nbFrameBufferReleased(nbFrame *frame, uint32_t buffer_id)
+{
+    int i;
+
+    for (i = 0; i < NB_NBUFFERS; i++) {
+        if (frame->buffers[i].ws != NULL &&
+            ws_buffer_id(frame->buffers[i].ws) == buffer_id) {
+            frame->buffers[i].busy = FALSE;
+            if (frame->commit_wanted && !frame->frame_pending)
+                nbFrameCommit(frame);
+            return;
+        }
+    }
 }
 
 static void
@@ -192,6 +338,8 @@ nbCreateFrame(RootlessWindowPtr pFrame, ScreenPtr pScreen, int newX,
     frame->height = pFrame->height;
     frame->rwin = pFrame;
     RegionNull(&frame->damage);
+    for (int i = 0; i < NB_NBUFFERS; i++)
+        RegionNull(&frame->buffers[i].stale);
     nbFrameStyle(pWin, &frame->level, &frame->flags, &frame->format);
 
     /* TODO: shaped windows (pShape) need input regions in WindowServer. */
@@ -207,15 +355,13 @@ nbCreateFrame(RootlessWindowPtr pFrame, ScreenPtr pScreen, int newX,
         return FALSE;
     }
 
-    frame->buffer = nbBufferCreate(frame->width, frame->height,
-                                   frame->format);
-    if (frame->buffer == NULL) {
+    /* The first buffer is made and attached by the first commit. */
+    if (!nbBackingAlloc(frame, frame->width, frame->height)) {
         ws_window_destroy(nbConnection(), frame->wid);
         RegionUninit(&frame->damage);
         free(frame);
         return FALSE;
     }
-    ws_window_attach(nbConnection(), frame->wid, frame->buffer);
 
     xorg_list_add(&frame->link, &nbScreenInfo.frames);
     pFrame->wid = frame;
@@ -242,9 +388,11 @@ nbDestroyFrame(RootlessFrameID wid)
     xorg_list_del(&frame->link);
     if (frame->wid != 0 && nbConnection() != NULL)
         ws_window_destroy(nbConnection(), frame->wid);
-    if (frame->buffer != NULL && nbConnection() != NULL)
-        ws_buffer_destroy(nbConnection(), frame->buffer);
+    nbBuffersDestroy(frame);
+    for (int i = 0; i < NB_NBUFFERS; i++)
+        RegionUninit(&frame->buffers[i].stale);
     RegionUninit(&frame->damage);
+    free(frame->bits);
     free(frame);
 }
 
@@ -262,14 +410,14 @@ nbMoveFrame(RootlessFrameID wid, ScreenPtr pScreen, int newX, int newY)
 }
 
 /*
- * Copy what the old buffer can keep into the new one, anchored as the
+ * Copy what the old backing can keep into the new one, anchored as the
  * window's bit gravity says, so the window doesn't flash empty while X
  * repaints the rest.
  */
 static void
-nbCopyByGravity(ws_buffer_t *from, unsigned int ow, unsigned int oh,
-                ws_buffer_t *to, unsigned int nw, unsigned int nh,
-                unsigned int gravity)
+nbCopyByGravity(const char *from, unsigned int fstride, unsigned int ow,
+                unsigned int oh, char *to, unsigned int tstride,
+                unsigned int nw, unsigned int nh, unsigned int gravity)
 {
     unsigned int w = min(ow, nw), h = min(oh, nh), row;
     unsigned int sx = 0, sy = 0, dx = 0, dy = 0;
@@ -296,13 +444,12 @@ nbCopyByGravity(ws_buffer_t *from, unsigned int ow, unsigned int oh,
     default:
         return;
     }
-    src = (const char *) ws_buffer_data(from) + sy * ws_buffer_stride(from) +
-        sx * 4;
-    dst = (char *) ws_buffer_data(to) + dy * ws_buffer_stride(to) + dx * 4;
+    src = from + sy * fstride + sx * 4;
+    dst = to + dy * tstride + dx * 4;
     for (row = 0; row < h; row++) {
         memcpy(dst, src, w * 4);
-        src += ws_buffer_stride(from);
-        dst += ws_buffer_stride(to);
+        src += fstride;
+        dst += tstride;
     }
 }
 
@@ -311,22 +458,26 @@ nbResizeFrame(RootlessFrameID wid, ScreenPtr pScreen, int newX, int newY,
               unsigned int newW, unsigned int newH, unsigned int gravity)
 {
     nbFrame *frame = wid;
-    ws_buffer_t *buffer;
+    char *old = frame->bits;
+    unsigned int ostride = frame->stride;
     ws_rect_t r;
 
     if (newW != frame->width || newH != frame->height) {
-        buffer = nbBufferCreate(newW, newH, frame->format);
-        if (buffer == NULL)
-            return;             /* keep the old size; X redraws into it */
-        if (frame->buffer != NULL) {
-            nbCopyByGravity(frame->buffer, frame->width, frame->height,
-                            buffer, newW, newH, gravity);
-            ws_window_attach(nbConnection(), frame->wid, buffer);
-            ws_buffer_destroy(nbConnection(), frame->buffer);
-        } else {
-            ws_window_attach(nbConnection(), frame->wid, buffer);
+        if (!nbBackingAlloc(frame, newW, newH)) {
+            frame->bits = old;  /* keep the old size; X redraws into it */
+            return;
         }
-        frame->buffer = buffer;
+        nbCopyByGravity(old, ostride, frame->width, frame->height,
+                        frame->bits, frame->stride, newW, newH, gravity);
+        free(old);
+        /*
+         * New buffers at the new size, made by the commit below.
+         * WindowServer keeps showing the old one until then. The commit
+         * goes now, whatever the frame pacing: the window must not show
+         * its new size with old contents longer than it has to.
+         */
+        nbBuffersDestroy(frame);
+        frame->frame_pending = FALSE;
     }
 
     frame->x = newX;
@@ -420,8 +571,8 @@ nbStartDrawing(RootlessFrameID wid, char **pixelData, int *bytesPerRow)
 {
     nbFrame *frame = wid;
 
-    *pixelData = ws_buffer_data(frame->buffer);
-    *bytesPerRow = ws_buffer_stride(frame->buffer);
+    *pixelData = frame->bits;
+    *bytesPerRow = frame->stride;
 }
 
 static void
