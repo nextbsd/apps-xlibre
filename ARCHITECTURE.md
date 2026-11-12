@@ -88,6 +88,16 @@ XLibre/
   is hidden: Xnextbsd orders every frame out on WindowServer and leaves the
   X windows mapped). Focus follows WindowServer's key window inside
   Xnextbsd, and override-redirect windows get the popup level there.
+  The other way, Xnextbsd puts WindowServer's usable area (the screen
+  minus the Dock's strip) on the root window as `_XNEXTBSD_USABLE_AREA`,
+  and the window manager keeps `_NET_WORKAREA`, and so new windows, inside
+  it.
+- **Screen changes:** when WindowServer's screen changes size, Xnextbsd
+  resizes the root window and tells X clients through RandR (one output,
+  the current mode; X clients can't set another). WindowServer moves the
+  windows that no longer fit just onto the screen, and Xnextbsd moves the
+  X windows with them; the window manager then moves those frames into
+  the usable area.
 - **The clipboard bridge and gpbs:** NSPasteboard. The bridge owns
   CLIPBOARD for the general pasteboard and PRIMARY for the "Selection"
   pasteboard, as xpbs does, and copies new X owners' data to them: text

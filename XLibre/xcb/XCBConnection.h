@@ -67,6 +67,14 @@
 // point, cascaded down and to the right past windows already there.
 - (void) cascadePositionForWidth:(uint16_t)width height:(uint16_t)height
                                x:(int16_t *)x y:(int16_t *)y;
+// Where a new dialog goes: centred across the placement area, at the
+// golden ratio down it.
+- (void) dialogPositionForWidth:(uint16_t)width height:(uint16_t)height
+                              x:(int16_t *)x y:(int16_t *)y;
+// The part of the screen new windows are placed in: _NET_WORKAREA, which
+// the window manager keeps inside WindowServer's usable area (the screen
+// minus the Dock's strip) and clear of struts.
+- (XCBRect) placementArea;
 
 + (XCBConnection *) sharedConnectionAsWindowManager:(BOOL)asWindowManager;
 - (xcb_connection_t *) connection;

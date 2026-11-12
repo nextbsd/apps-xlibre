@@ -62,6 +62,7 @@
 
 #include "dix/dix_priv.h"
 #include "dix/property_priv.h"
+#include "dix/resource_priv.h"
 #include "scrnintstr.h"
 #include "windowstr.h"
 #include "rootlessCommon.h"
@@ -402,11 +403,50 @@ nbMoveFrame(RootlessFrameID wid, ScreenPtr pScreen, int newX, int newY)
     nbFrame *frame = wid;
     ws_rect_t r;
 
+    /* Already there: X following a move WindowServer made, for one. */
+    if (frame->x == newX && frame->y == newY)
+        return;
     frame->x = newX;
     frame->y = newY;
     r = nbRect(newX, newY, frame->width, frame->height);
     if (ws_window_set_frame(nbConnection(), frame->wid, &r) < 0)
         nbWindowServerLost("move");
+}
+
+/*
+ * WindowServer moved a frame itself (WS_EVENT_WINDOW_FRAME): after a
+ * screen change, it puts the windows that no longer fit back on the
+ * screen. X follows, so that its window is where WindowServer shows it:
+ * the top-level window moves as if its owner had moved it (the window
+ * manager, for a frame of its own), and X clients and the window manager
+ * see the ConfigureNotify. Should another client redirect the move (a
+ * window manager, for a window that isn't its own), WindowServer is put
+ * back where X still has the window until that client decides.
+ */
+void
+nbFrameMovedByWindowServer(nbFrame *frame, const ws_rect_t *r)
+{
+    WindowPtr pWin = nbFrameWindow(frame);
+    ClientPtr owner;
+    XID vlist[2];
+    int x, y;
+
+    if (r->x == frame->x && r->y == frame->y)
+        return;
+    frame->x = r->x;
+    frame->y = r->y;
+    if (pWin == NULL || pWin->parent == NULL)
+        return;
+
+    vlist[0] = (XID) (INT16) (r->x - pWin->parent->drawable.x);
+    vlist[1] = (XID) (INT16) (r->y - pWin->parent->drawable.y);
+    owner = dixClientForWindow(pWin);
+    ConfigureWindow(pWin, CWX | CWY, vlist, owner ? owner : serverClient);
+
+    x = pWin->drawable.x - wBorderWidth(pWin);
+    y = pWin->drawable.y - wBorderWidth(pWin);
+    if (x != r->x || y != r->y)
+        nbMoveFrame(frame, pWin->drawable.pScreen, x, y);
 }
 
 /*

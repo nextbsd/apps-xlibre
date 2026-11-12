@@ -82,6 +82,10 @@ typedef struct nbScreen {
     int repeat_interval;        /* 0: no key repeat */
     int width, height;
     int mm_width, mm_height;
+    unsigned int refresh_mhz;   /* WindowServer's refresh rate, 0 if unknown */
+    char screen_name[32];       /* WindowServer's name for the screen */
+    ws_rect_t usable;           /* WindowServer's usable area */
+    Bool usable_dirty;          /* not on the root window yet */
     struct xorg_list frames;
     Bool active;                /* we are WindowServer's active app */
     nbFrame *pointer_frame;     /* the frame WindowServer says the pointer
@@ -107,6 +111,7 @@ WindowPtr nbFrameWindow(nbFrame *frame);
 void nbFrameOrdered(nbFrame *frame, const ws_event_ordered_t *ordered);
 void nbFrameDone(nbFrame *frame);
 void nbFrameBufferReleased(nbFrame *frame, uint32_t buffer_id);
+void nbFrameMovedByWindowServer(nbFrame *frame, const ws_rect_t *r);
 
 /*
  * The window manager's channel to the server, a property on the root
@@ -114,6 +119,20 @@ void nbFrameBufferReleased(nbFrame *frame, uint32_t buffer_id);
  * is hidden and to 0 (or deleted) when it is shown again.
  */
 #define NB_HIDDEN_ATOM "_XNEXTBSD_HIDDEN"
+
+/*
+ * The other way, set by the server: _XNEXTBSD_USABLE_AREA (CARDINAL/32
+ * x, y, width, height) on the root window is WindowServer's usable area,
+ * the screen minus the Dock's strip, for the window manager to place
+ * windows in.
+ */
+#define NB_USABLE_AREA_ATOM "_XNEXTBSD_USABLE_AREA"
+
+/* nbRandR.c */
+Bool nbRandRInit(ScreenPtr pScreen);
+void nbScreenChanged(const ws_screen_info_t *si);
+void nbUsableAreaChanged(const ws_rect_t *usable);
+void nbUsableAreaPublish(void);
 
 /* nbInput.c */
 void nbInputDispatch(int fd, int ready, void *data);

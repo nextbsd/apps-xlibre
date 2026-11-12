@@ -770,11 +770,14 @@ nbHandleEvent(ws_connection_t *conn, const ws_event_t *ev, void *context)
         break;
 
     case WS_EVENT_SCREEN_CHANGED:
-        /* TODO: resize the root window and RandR (apps-xlibre#8). */
-        LogMessage(X_WARNING, "Xnextbsd: WindowServer's screen changed "
-                   "(%ux%u); not followed yet\n", ev->u.screen.width,
-                   ev->u.screen.height);
+        nbScreenChanged(&ev->u.screen);
         break;
+
+#ifdef WS_SERVER_USABLE_AREA
+    case WS_EVENT_USABLE_AREA:
+        nbUsableAreaChanged(&ev->u.usable_area.usable);
+        break;
+#endif
 
     case WS_EVENT_ERROR:
         ErrorF("Xnextbsd: WindowServer error for request %u: %s (%s)\n",
@@ -795,7 +798,16 @@ nbHandleEvent(ws_connection_t *conn, const ws_event_t *ev, void *context)
         break;
 
     case WS_EVENT_WINDOW_FRAME:
-        /* WindowServer moves only icon windows itself; we have none. */
+        /*
+         * WindowServer moved one of our windows itself: back onto a
+         * screen that shrank (it moves icon windows too, but we have
+         * none).
+         */
+        frame = nbFrameFromWID(ev->hdr.window);
+        if (frame != NULL)
+            nbFrameMovedByWindowServer(frame, &ev->u.frame.frame);
+        break;
+
     default:
         break;
     }
