@@ -3470,7 +3470,11 @@ static XCBConnection *sharedInstance;
     [client focus];
     xcb_flush(connection);
 
-    if (activate && ![NSApp isActive])
+    // Restoring a window of a hidden XLibre shows XLibre again, with its
+    // other windows, as for any app.
+    if ([NSApp isHidden])
+        [NSApp unhide:nil];
+    else if (activate && ![NSApp isActive])
         [NSApp activateIgnoringOtherApps:YES];
 }
 

@@ -169,7 +169,8 @@
 - (void)minimizeWindowIntoWindowServer:(XCBWindow *)aWindow;
 // Show a minimized window again: WM_STATE NormalState, raised and
 // focused, and XLibre active when `activate` says so (WindowServer has
-// already activated it when the user restored the window there).
+// already activated it when the user restored the window there), and
+// shown if it was hidden.
 - (void)restoreMinimizedWindow:(XCBWindow *)aWindow activate:(BOOL)activate;
 
 /*** WINDOW TILING ***/
