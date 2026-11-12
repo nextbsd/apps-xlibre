@@ -466,6 +466,7 @@
             xcb_focus_in_event_t *focusInEvent = (xcb_focus_in_event_t *)event;
             [connection handleFocusIn:focusInEvent];
             [self handleFocusChange:focusInEvent->event isActive:YES];
+            [self xFocusInWhileAppKitWindowKey:focusInEvent];
             break;
         }
         case XCB_FOCUS_OUT: {
@@ -1926,6 +1927,101 @@
 - (void)removeWindowFromRecentlyFocused:(NSNumber *)windowIdNum
 {
     [self.focusManager removeWindowFromRecentlyFocused:windowIdNum];
+}
+
+#pragma mark - XLibre's own windows
+
+// The X window that had the focus when one of XLibre's GNUstep windows
+// became key, or XCB_NONE.
+static xcb_window_t appKitSavedFocus = XCB_NONE;
+static BOOL appKitWindowKey = NO;
+
+static xcb_window_t
+currentInputFocus(xcb_connection_t *c)
+{
+    xcb_get_input_focus_reply_t *r =
+        xcb_get_input_focus_reply(c, xcb_get_input_focus(c), NULL);
+    xcb_window_t w = r != NULL ? r->focus : XCB_NONE;
+
+    free(r);
+    return w;
+}
+
+- (xcb_window_t)rootWindowId
+{
+    xcb_screen_t *screen = xcb_setup_roots_iterator(
+        xcb_get_setup([connection connection])).data;
+
+    return screen != NULL ? screen->root : XCB_NONE;
+}
+
+// A GNUstep window of ours is key: WindowServer sends it the keys, so
+// take X's focus off the X window (to the root window, which is in no
+// frame, so Xnextbsd doesn't make a frame key for it) and draw that
+// window's title bar inactive, as for any window that isn't key.
+- (void)appKitWindowBecameKey
+{
+    xcb_connection_t *c = [connection connection];
+    xcb_window_t root = [self rootWindowId], focused;
+
+    if (c == NULL || root == XCB_NONE)
+        return;
+    appKitWindowKey = YES;
+    focused = self.focusManager.lastFocusedWindowId;
+    if (focused != XCB_NONE)
+        appKitSavedFocus = focused;
+    xcb_set_input_focus(c, XCB_INPUT_FOCUS_POINTER_ROOT, root,
+                        XCB_CURRENT_TIME);
+    if (focused != XCB_NONE)
+        [self handleFocusChange:focused isActive:NO];
+    self.focusManager.lastFocusedWindowId = XCB_NONE;
+    [connection flush];
+}
+
+// An X window got the focus while one of our GNUstep windows was key: the
+// user clicked it, WindowServer made its frame key and Xnextbsd focused
+// it. WindowServer doesn't tell the GNUstep window it lost the key to
+// another connection of our app, so it would stay key (and drawn key) in
+// AppKit: resign it here.
+- (void)xFocusInWhileAppKitWindowKey:(xcb_focus_in_event_t *)event
+{
+    if (!appKitWindowKey || event->event == [self rootWindowId] ||
+        event->detail == XCB_NOTIFY_DETAIL_POINTER ||
+        event->detail == XCB_NOTIFY_DETAIL_POINTER_ROOT ||
+        event->detail == XCB_NOTIFY_DETAIL_NONE)
+        return;
+    appKitWindowKey = NO;
+    appKitSavedFocus = XCB_NONE;
+    [[NSApp keyWindow] resignKeyWindow];
+}
+
+// None of our GNUstep windows is key any more. If the X focus is still
+// where we left it (the user didn't click another X window, which
+// Xnextbsd then focuses itself) and XLibre is still the active app, give
+// it back to the window that had it; its FocusIn redraws the title bar
+// active, and Xnextbsd makes its frame key again.
+- (void)appKitWindowsResignedKey
+{
+    xcb_connection_t *c = [connection connection];
+    xcb_window_t saved = appKitSavedFocus;
+    XCBWindow *client;
+
+    if (!appKitWindowKey)
+        return;
+    appKitWindowKey = NO;
+    appKitSavedFocus = XCB_NONE;
+    if (c == NULL || saved == XCB_NONE || ![NSApp isActive] ||
+        currentInputFocus(c) != [self rootWindowId])
+        return;
+    client = [self.focusManager windowForClientWindowId:saved];
+    if (client == nil)
+        client = [connection windowForXCBId:saved];
+    if (client == nil || ![self.focusManager isWindowFocusable:client
+                                                  allowDesktop:NO])
+        return;
+    [client focus];
+    [self handleFocusChange:saved isActive:YES];
+    [connection flush];
 }
 
 @end

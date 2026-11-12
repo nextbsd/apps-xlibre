@@ -64,4 +64,10 @@
 // ICCCM Manager Selection Protocol
 - (void)handleSelectionClear:(xcb_selection_clear_event_t *)event;
 
+// XLibre's own GNUstep windows (About, Preferences, the Quit alert): while
+// one is key, no X window has the X focus or an active title bar; when
+// none is, the X window that had it gets it back.
+- (void)appKitWindowBecameKey;
+- (void)appKitWindowsResignedKey;
+
 @end
