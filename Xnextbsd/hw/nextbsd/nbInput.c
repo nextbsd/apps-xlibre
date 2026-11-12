@@ -721,7 +721,8 @@ nbFocusCheck(void)
         return;
     nbScreenInfo.x_focus_frame = frame;
     if (frame == NULL || frame == nbScreenInfo.key_frame ||
-        !frame->ordered_in || (frame->flags & WS_WINDOW_NO_KEY))
+        !frame->ordered_in || frame->minimized ||
+        (frame->flags & WS_WINDOW_NO_KEY))
         return;
     if (ws_window_make_key(nbConnection(), frame->wid) < 0)
         nbWindowServerLost("make key");
@@ -902,13 +903,19 @@ nbHandleEvent(ws_connection_t *conn, const ws_event_t *ev, void *context)
 
     case WS_EVENT_WINDOW_FRAME:
         /*
-         * WindowServer moved one of our windows itself: back onto a
-         * screen that shrank (it moves icon windows too, but we have
-         * none).
+         * WindowServer moved or resized one of our windows itself:
+         * window tiling, or back onto a screen that shrank.
          */
         frame = nbFrameFromWID(ev->hdr.window);
         if (frame != NULL)
-            nbFrameMovedByWindowServer(frame, &ev->u.frame.frame);
+            nbFrameSetByWindowServer(frame, &ev->u.frame.frame);
+        break;
+
+    case WS_EVENT_WINDOW_RESTORE:
+        /* The user restored a minimized window (the Dock, its tile). */
+        frame = nbFrameFromWID(ev->hdr.window);
+        if (frame != NULL)
+            nbFrameRestoreRequested(frame);
         break;
 
     default:

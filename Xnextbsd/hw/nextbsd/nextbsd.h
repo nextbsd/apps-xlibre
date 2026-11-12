@@ -76,6 +76,10 @@ typedef struct nbFrame {
                                    transparent */
     CursorPtr cursor;           /* the X cursor WindowServer shows over
                                    this frame (WS_SERVER_WINDOW_CURSOR) */
+    Bool minimized;             /* minimized on WindowServer (in the Dock or
+                                   a tile) while X keeps it mapped */
+    uint32_t limits[4];         /* the size limits WindowServer last got:
+                                   min width, height, max width, height */
     RootlessWindowPtr rwin;
 } nbFrame;
 
@@ -103,6 +107,9 @@ typedef struct nbScreen {
                                    out on WindowServer, X keeps them mapped */
     Bool ws_grab;               /* we hold WindowServer's pointer grab, for
                                    an X client's active grab */
+    Bool frames_dirty;          /* a window manager property changed: look
+                                   at every frame's style, size limits and
+                                   minimized state before sleeping */
     XYToWindowProcPtr XYToWindow;
 } nbScreen;
 
@@ -119,7 +126,9 @@ WindowPtr nbFrameWindow(nbFrame *frame);
 void nbFrameOrdered(nbFrame *frame, const ws_event_ordered_t *ordered);
 void nbFrameDone(nbFrame *frame);
 void nbFrameBufferReleased(nbFrame *frame, uint32_t buffer_id);
-void nbFrameMovedByWindowServer(nbFrame *frame, const ws_rect_t *r);
+void nbFrameSetByWindowServer(nbFrame *frame, const ws_rect_t *r);
+void nbFrameRestoreRequested(nbFrame *frame);
+void nbFramesUpdate(void);
 nbFrame *nbFrameOfWindow(WindowPtr pWin);
 
 /*
@@ -136,6 +145,23 @@ nbFrame *nbFrameOfWindow(WindowPtr pWin);
  * windows in.
  */
 #define NB_USABLE_AREA_ATOM "_XNEXTBSD_USABLE_AREA"
+
+/*
+ * Minimizing, set by the window manager on a top-level window (its frame):
+ * _XNEXTBSD_MINIMIZED (CARDINAL/32, one of WS_MINIMIZE_DEFAULT,
+ * _BOTTOM_ROW, _INTO_DOCK) asks the server to minimize that window on
+ * WindowServer, there; deleting it shows the window again. The X window
+ * stays mapped meanwhile, so WindowServer's preview of it stays live.
+ *
+ * When the user restores the window from WindowServer (the Dock, a
+ * tile, the overview), the server shows it again, deletes the property
+ * and sends the window manager a _XNEXTBSD_RESTORE ClientMessage (format
+ * 32, window and data.l[0] the top-level window) on the root window with
+ * SubstructureRedirectMask, so that it sets WM_STATE back to NormalState,
+ * raises the window and gives it the focus.
+ */
+#define NB_MINIMIZED_ATOM "_XNEXTBSD_MINIMIZED"
+#define NB_RESTORE_ATOM "_XNEXTBSD_RESTORE"
 
 /* nbRandR.c */
 Bool nbRandRInit(ScreenPtr pScreen);

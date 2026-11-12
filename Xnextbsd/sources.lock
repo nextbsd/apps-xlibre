@@ -26,6 +26,7 @@ nextbsd-xlibre      7b084e8a7230ffaaef87140be8d0084b2a60e6ca  77243026ceb2976d48
 # notices), the screen events (apps-windowserver#30: screen changes and
 # the usable area) and pointer grabs, warp, query and tracking, window
 # cursors, input regions, frames in commits and window ids chosen by the
-# client (apps-windowserver#8, #9), which Xnextbsd uses when the
-# WindowServer it runs on has them.
-apps-windowserver   cf632afbb42a45e8b57ed32c3a6a6fe5b6c0661e  a8a2bad21c645c71943e5c020f5483c76ccf81f9031f78359adefe31949ce937  https://github.com/nextbsd/apps-windowserver/archive/cf632afbb42a45e8b57ed32c3a6a6fe5b6c0661e.tar.gz
+# client (apps-windowserver#8, #9), and window tiling (apps-windowserver#44:
+# frames with sizes, size limits, panel and fixed-size windows), which
+# Xnextbsd uses when the WindowServer it runs on has them.
+apps-windowserver   c0c3f6b4a625cbe07d279ae751825d70470022e8  2f4488c224ec11ab5f139124f23fda871e0fe15ba7b03e1cbdc081ae7a7847e7  https://github.com/nextbsd/apps-windowserver/archive/c0c3f6b4a625cbe07d279ae751825d70470022e8.tar.gz
