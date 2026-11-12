@@ -705,21 +705,13 @@
 
     if ([anAtomMessageName isEqualToString:EWMHActiveWindow])
     {
-        BOOL wasMinimized = NO;
+        BOOL wasMinimized = [aWindow isMinimized];
         XCBFrame *frame = nil;
-        XCBTitleBar *titleBar = nil;
-        XCBWindow *clientWindow = aWindow;
 
         if ([[aWindow parentWindow] isKindOfClass:[XCBFrame class]])
         {
             frame = (XCBFrame *) [aWindow parentWindow];
-            titleBar = (XCBTitleBar *) [frame childWindowForKey:TitleBar];
-            clientWindow = [frame childWindowForKey:ClientWindow];
-            wasMinimized = [frame isMinimized] || [aWindow isMinimized];
-        }
-        else
-        {
-            wasMinimized = [aWindow isMinimized];
+            wasMinimized = wasMinimized || [frame isMinimized];
         }
 
         if (wasMinimized)
@@ -753,11 +745,9 @@
             if ([[aWindow parentWindow] isKindOfClass:[XCBFrame class]])
             {
                 frame = (XCBFrame *) [aWindow parentWindow];
-                titleBar = (XCBTitleBar *) [frame childWindowForKey:TitleBar];
                 [frame stackAbove];
                 [connection restackDockWindowsAbove];
                 frame = nil;
-                titleBar = nil;
             }
         }
 
