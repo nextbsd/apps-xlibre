@@ -13,8 +13,8 @@
 # XLibre.app installs as the user, in whichever GNUstep domain they choose
 # (~/Applications by default), and runs Xnextbsd from inside its bundle:
 # nothing goes in a system path, nothing needs root, and Xnextbsd is not
-# set-uid. Until XLibre.app exists (apps-xlibre#5) this makes the
-# bundle's Resources directory with Xnextbsd in it and nothing else.
+# set-uid. XLibre/'s "gmake install" calls this with XLIBRE_APP set to
+# where it installed the app.
 
 GNUSTEP_USER_APPS ?= $(shell gnustep-config --variable=GNUSTEP_USER_APPS 2>/dev/null || echo $(HOME)/Applications)
 XLIBRE_APP	?= $(GNUSTEP_USER_APPS)/XLibre.app

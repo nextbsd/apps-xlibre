@@ -72,6 +72,8 @@ typedef struct nbScreen {
     nbFrame *key_frame;         /* WindowServer's key window, or NULL */
     nbFrame *x_focus_frame;     /* frame of X's input focus last time we
                                    looked, to tell WindowServer once */
+    Bool hidden;                /* XLibre.app hid us: every frame is ordered
+                                   out on WindowServer, X keeps them mapped */
     XYToWindowProcPtr XYToWindow;
 } nbScreen;
 
@@ -86,6 +88,13 @@ Bool nbFrameInit(ScreenPtr pScreen);
 nbFrame *nbFrameFromWID(uint32_t wid);
 WindowPtr nbFrameWindow(nbFrame *frame);
 void nbFrameOrdered(nbFrame *frame, const ws_event_ordered_t *ordered);
+
+/*
+ * The window manager's channel to the server, a property on the root
+ * window: _XNEXTBSD_HIDDEN (CARDINAL/32), set to 1 by XLibre.app when it
+ * is hidden and to 0 (or deleted) when it is shown again.
+ */
+#define NB_HIDDEN_ATOM "_XNEXTBSD_HIDDEN"
 
 /* nbInput.c */
 void nbInputDispatch(int fd, int ready, void *data);

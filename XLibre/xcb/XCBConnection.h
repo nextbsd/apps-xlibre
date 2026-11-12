@@ -24,23 +24,6 @@
 #define CLIENTLISTSIZE 1000
 #define WINDOWSMAPUPDATED @"windowsMapUpdated"
 
-// Edge snap detection constants
-#define SNAP_EDGE_THRESHOLD 5    // Pixels from screen edge to trigger snap detection
-#define SNAP_CORNER_THRESHOLD 50 // Pixels from corner to trigger quarter snap
-#define SNAP_LINGER_TIME 300     // Milliseconds to linger before snap activates
-
-// Snap zone types for drag-to-edge window snapping
-typedef NS_ENUM(NSInteger, SnapZone) {
-    SnapZoneNone = 0,
-    SnapZoneTop,         // Maximize window
-    SnapZoneLeft,        // Snap to left half
-    SnapZoneRight,       // Snap to right half
-    SnapZoneTopLeft,     // Snap to top-left quarter
-    SnapZoneTopRight,    // Snap to top-right quarter
-    SnapZoneBottomLeft,  // Snap to bottom-left quarter
-    SnapZoneBottomRight  // Snap to bottom-right quarter
-};
-
 @class XCBWindow;
 @class EWMHService;
 @class XCBAtomService;
@@ -76,11 +59,10 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 @property (nonatomic, assign) xcb_window_t expectedFocusWindow;
 @property (nonatomic, assign) xcb_timestamp_t expectedFocusTimestamp;
 
-// Edge snap detection state
-@property (nonatomic, assign) SnapZone pendingSnapZone;
-@property (nonatomic, assign) xcb_timestamp_t snapZoneEntryTime;
-@property (nonatomic, assign) BOOL snapPreviewShown;
 @property (nonatomic, assign) BOOL adoptingExistingWindows;
+// Where a window that doesn't ask for a position goes (top-left corner).
+@property (nonatomic, assign) int16_t placementX;
+@property (nonatomic, assign) int16_t placementY;
 
 + (XCBConnection *) sharedConnectionAsWindowManager:(BOOL)asWindowManager;
 - (xcb_connection_t *) connection;
@@ -167,17 +149,9 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 
 /*** WINDOW TILING ***/
 
-- (void)centerActiveWindow;
 - (void)centerFrame:(XCBFrame *)frame;
-- (void)tileActiveWindowLeft;
-- (void)tileActiveWindowRight;
-- (void)tileActiveWindowToZone:(SnapZone)zone;
 - (void)maximizeFrameVertically:(XCBFrame *)frame;
 - (void)maximizeFrameHorizontally:(XCBFrame *)frame;
-- (void)showSnapPreviewForZone:(SnapZone)zone frame:(XCBFrame *)frame;
-- (void)hideSnapPreview;
-- (void)executeSnapForZone:(SnapZone)zone frame:(XCBFrame *)frame;
 
-- (BOOL)windowIsGNUstepClient:(xcb_window_t)aWindow;
 
 @end

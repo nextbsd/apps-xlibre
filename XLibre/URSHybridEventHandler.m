@@ -1,57 +1,44 @@
 //
 //  URSHybridEventHandler.m
-//  uroswm - Event Coordinator
+//  XLibre.app - the window manager
 //
 //  Created by Alessandro Sangiuliano on 22/06/20.
 //  Copyright (c) 2020 Alessandro Sangiuliano. All rights reserved.
 //
-//  Coordinator: owns the XCB event loop and dispatches to single-responsibility
-//  managers (focus, keyboard, workarea, titlebar, snapping menu).
+//  Owns the XCB event loop on the NSRunLoop and dispatches to the focus,
+//  workarea and title bar managers. In XLibre.app it manages the windows
+//  of Xnextbsd, whose frames are WindowServer windows: WindowServer
+//  composites them, and Command-Tab and the Dock belong to WindowServer,
+//  so there is no compositor, window switcher, keyboard grab or snapping
+//  here.
 //
 
 #import "URSHybridEventHandler.h"
 #import "URSProfiler.h"
-
-/* Class extension for private ivars */
-@interface URSHybridEventHandler () {
-@public
-  xcb_window_t _spatialPathClientWindow;
-}
-@end
 #import "XCBScreen.h"
 #import "XCBQueryTreeReply.h"
 #import "XCBAttributesReply.h"
 #import <xcb/xcb.h>
 #import <xcb/xcb_icccm.h>
 #import <xcb/xcb_aux.h>
-#import <xcb/damage.h>
-#import <xcb/present.h>
 #import <xcb/randr.h>
 #import <xcb/xproto.h>
-#import <X11/keysym.h>
 #import "EWMHService.h"
 #import "XCBAtomService.h"
 #import "ICCCMService.h"
 #import "XCBFrame.h"
 #import "URSThemeIntegration.h"
 #import "URSDecorationMetrics.h"
-#import "URSWindowSwitcher.h"
 
 @implementation URSHybridEventHandler
 
 @synthesize connection;
 @synthesize selectionManagerWindow;
 @synthesize xcbEventsIntegrated;
-@synthesize nsRunLoopActive;
 @synthesize eventCount;
-@synthesize windowSwitcher;
-@synthesize compositingManager;
-@synthesize compositingRequested;
 @synthesize focusManager;
-@synthesize keyboardManager;
 @synthesize workareaManager;
 @synthesize titlebarController;
-@synthesize snappingMenuController;
 @synthesize randrEventBase = _randrEventBase;
 
 #pragma mark - Initialization
@@ -65,63 +52,35 @@
         return nil;
     }
 
-    // Initialize event tracking
     self.xcbEventsIntegrated = NO;
-    self.nsRunLoopActive = NO;
     self.eventCount = 0;
     _randrEventBase = 0;
 
-    // Initialize XCB connection
+    // The X server named by DISPLAY: XLibre.app sets it once Xnextbsd is up.
     connection = [XCBConnection sharedConnectionAsWindowManager:YES];
-    
-    // Initialize spatial path tracking
-    _spatialPathClientWindow = XCB_NONE;
+    if (connection == nil || [connection connection] == NULL ||
+        xcb_connection_has_error([connection connection])) {
+        NSLog(@"[XLibre] can't connect to the X server");
+        return nil;
+    }
 
-    // Initialize window switcher
-    self.windowSwitcher = [URSWindowSwitcher sharedSwitcherWithConnection:connection];
-
-    // --- Create single-responsibility managers ---
     self.focusManager = [[URSFocusManager alloc] initWithConnection:connection
                                                     selectionWindow:nil]; // set after registerAsWindowManager
-    self.keyboardManager = [[URSKeyboardManager alloc] initWithConnection:connection
-                                                          windowSwitcher:self.windowSwitcher];
-    self.keyboardManager.focusManager = self.focusManager;
     self.workareaManager = [[URSWorkareaManager alloc] initWithConnection:connection];
     self.titlebarController = [[URSTitlebarController alloc] initWithConnection:connection];
     self.titlebarController.workareaManager = self.workareaManager;
     self.titlebarController.focusManager = self.focusManager;
-    self.snappingMenuController = [[URSSnappingMenuController alloc] initWithConnection:connection];
-
-    // Check if compositing was requested via command-line
-    self.compositingRequested = [[NSUserDefaults standardUserDefaults] 
-                                  boolForKey:@"URSCompositingEnabled"];
-    
-    if (self.compositingRequested) {
-        //NSLog(@"[WindowManager] Compositing requested - will attempt to initialize");
-    } else {
-        //NSLog(@"[WindowManager] Compositing disabled - using direct rendering");
-    }
 
     return self;
 }
 
-#pragma mark - NSApplicationDelegate Methods
+#pragma mark - Starting
 
-- (void)applicationWillFinishLaunching:(NSNotification *)notification
+- (BOOL)start
 {
-}
-
-- (void)applicationDidFinishLaunching:(NSNotification *)notification
-{
-    // Mark NSRunLoop as active
-    self.nsRunLoopActive = YES;
-
-    // Register as window manager
-    BOOL registered = [self registerAsWindowManager];
-    if (!registered) {
-        NSLog(@"[WindowManager] Failed to register as WM; terminating");
-        [NSApp terminate:nil];
-        return;
+    if (![self registerAsWindowManager]) {
+        NSLog(@"[XLibre] can't become the X window manager");
+        return NO;
     }
 
     // Redraw all decorations when the user switches GSTheme. The Themes
@@ -138,113 +97,24 @@
     // Wire selectionManagerWindow into the focus manager now that it exists
     self.focusManager.selectionManagerWindow = self.selectionManagerWindow;
 
-    // Hide the GNUstep application icon window (NSIconWindow) from the Dock.
-    // The WM itself must not appear as an application entry.
-    {
-        NSArray *appWindows = [NSApp windows];
-        for (NSWindow *win in appWindows) {
-            if ([[win className] isEqualToString:@"NSIconWindow"]) {
-                xcb_window_t xid = (xcb_window_t)[win windowNumber];
-                EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:connection];
-                xcb_atom_t atoms[2];
-                atoms[0] = [[ewmh atomService] cacheAtom:[ewmh EWMHWMStateSkipTaskbar]];
-                atoms[1] = [[ewmh atomService] cacheAtom:[ewmh EWMHWMStateSkipPager]];
-                xcb_change_property([connection connection],
-                                   XCB_PROP_MODE_REPLACE,
-                                   xid,
-                                   [[ewmh atomService] cacheAtom:[ewmh EWMHWMState]],
-                                   XCB_ATOM_ATOM,
-                                   32,
-                                   2,
-                                   atoms);
-                [connection flush];
-                break;
-            }
-        }
-    }
-    
-    // Initialize compositing if requested
-    if (self.compositingRequested) {
-        [self initializeCompositing];
-        self.titlebarController.compositingManager = self.compositingManager;
-    }
-
-    // Decorate any existing windows already on screen
     [self decorateExistingWindowsOnStartup];
-
-    // Setup XCB event integration with NSRunLoop
     [self setupXCBEventIntegration];
-
-    // Setup RANDR screen-change monitoring (always, independent of compositing)
     [self setupRANDR];
-
-    // Setup keyboard grabbing for Alt-Tab
-    [self.keyboardManager setupKeyboardGrabbing];
+    return YES;
 }
 
-- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender
+#pragma mark - Managed windows
+
+- (NSUInteger)managedWindowCount
 {
-    return NSTerminateNow;
-}
-
-- (void)applicationWillTerminate:(NSNotification *)notification
-{
-    //NSLog(@"[WindowManager] Application terminating - performing full cleanup");
-    [self cleanupBeforeExit];
-}
-
-- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender
-{
-    // Keep running even if no windows are visible (window manager behavior)
-    return NO;
-}
-
-#pragma mark - Compositing Management
-
-- (void)initializeCompositing {
-    //NSLog(@"[WindowManager] ================================================");
-    //NSLog(@"[WindowManager] Initializing XRender compositing (experimental)");
-    //NSLog(@"[WindowManager] ================================================");
-    
-    @try {
-        // Create compositing manager singleton
-        self.compositingManager = [URSCompositingManager sharedManager];
-        
-        // Initialize with our XCB connection
-        BOOL initialized = [self.compositingManager initializeWithConnection:self.connection];
-        
-        if (!initialized) {
-            //NSLog(@"[WindowManager] ⚠️  Compositing initialization failed");
-            //NSLog(@"[WindowManager] ⚠️  Falling back to direct rendering (traditional mode)");
-            //NSLog(@"[WindowManager] ⚠️  Windows will render normally without compositing");
-            self.compositingManager = nil;
-            return;
-        }
-        
-        // Attempt to activate compositing
-        BOOL activated = [self.compositingManager activateCompositing];
-        
-        if (!activated) {
-            //NSLog(@"[WindowManager] ⚠️  Compositing activation failed");
-            //NSLog(@"[WindowManager] ⚠️  Falling back to direct rendering (traditional mode)");
-            //NSLog(@"[WindowManager] ⚠️  Windows will render normally without compositing");
-            [self.compositingManager cleanup];
-            self.compositingManager = nil;
-            return;
-        }
-        
-        //NSLog(@"[WindowManager] ✓ Compositing successfully activated!");
-        //NSLog(@"[WindowManager] ✓ Windows will use XRender for transparency effects");
-        //NSLog(@"[WindowManager] ================================================");
-        
-    } @catch (NSException *exception) {
-        NSLog(@"[WindowManager] ❌ EXCEPTION initializing compositing: %@", exception.reason);
-        //NSLog(@"[WindowManager] ❌ Falling back to non-compositing mode");
-        if (self.compositingManager) {
-            [self.compositingManager cleanup];
-            self.compositingManager = nil;
-        }
+    NSUInteger n = 0;
+    for (NSString *key in [connection windowsMap]) {
+        XCBWindow *w = [[connection windowsMap] objectForKey:key];
+        if ([w isKindOfClass:[XCBFrame class]] &&
+            [(XCBFrame *)w childWindowForKey:ClientWindow] != nil)
+            n++;
     }
+    return n;
 }
 
 #pragma mark - Original URSEventHandler Methods (Preserved)
@@ -347,11 +217,6 @@
                 continue;
             }
             
-            // GNUstep draws its own decorations, so leave its windows alone.
-            if ([connection windowIsGNUstepClient:winId]) {
-                continue;
-            }
-
             // Check if this is a dock window with struts - scan for struts even if already managed
             if ([ewmhService isWindowTypeDock:win]) {
                 //NSLog(@"[WindowManager] Found dock window %u at startup - checking for struts", winId);
@@ -379,13 +244,6 @@
             // border adjustment that the normal map-request flow provides.
             XCBWindow *mappedClient = [connection windowForXCBId:winId];
             if (mappedClient && [[mappedClient parentWindow] isKindOfClass:[XCBFrame class]]) {
-                if (self.compositingManager && [self.compositingManager compositingActive]) {
-                    [self.compositingManager registerWindow:winId];
-                    [self registerChildWindowsForCompositor:winId depth:3];
-                    XCBFrame *frame = (XCBFrame *)[mappedClient parentWindow];
-                    [self.compositingManager registerWindow:[frame window]];
-                    [self registerChildWindowsForCompositor:[frame window] depth:3];
-                }
                 [self adjustBorderForFixedSizeWindow:winId];
             }
 
@@ -499,7 +357,6 @@
             if (nextType == XCB_BUTTON_RELEASE || nextType == XCB_BUTTON_PRESS) {
                 [connection handleMotionNotify:lastMotionEvent];
                 [self.titlebarController handleResizeDuringMotion:lastMotionEvent];
-                [self handleCompositingDuringMotion:lastMotionEvent];
                 [self.titlebarController handleHoverDuringMotion:lastMotionEvent];
                 needFlush = YES;
                 free(lastMotionEvent);
@@ -521,11 +378,29 @@
     if (lastMotionEvent) {
         [connection handleMotionNotify:lastMotionEvent];
         [self.titlebarController handleResizeDuringMotion:lastMotionEvent];
-        [self handleCompositingDuringMotion:lastMotionEvent];
         [self.titlebarController handleHoverDuringMotion:lastMotionEvent];
         needFlush = YES;
         free(lastMotionEvent);
         lastMotionEvent = NULL;
+    }
+
+    // The X server went away: stop watching its fd (it would stay
+    // readable) and let XLibre.app quit.
+    if (xcb_connection_has_error([connection connection])) {
+        if (self.xcbEventsIntegrated) {
+            int fd = xcb_get_file_descriptor([connection connection]);
+            for (NSString *mode in @[NSDefaultRunLoopMode, NSEventTrackingRunLoopMode,
+                                     NSModalPanelRunLoopMode])
+                [[NSRunLoop currentRunLoop] removeEvent:(void*)(uintptr_t)fd
+                                                   type:ET_RDESC
+                                                forMode:mode
+                                                    all:YES];
+            self.xcbEventsIntegrated = NO;
+            [[NSNotificationCenter defaultCenter]
+                postNotificationName:@"URSXConnectionLostNotification" object:self];
+        }
+        URS_PROFILE_END(eventLoop);
+        return;
     }
 
     // Batched flush: only flush when needed
@@ -534,14 +409,6 @@
         [connection setNeedFlush:NO];
     }
     
-    // Immediate repair when the compositor has pending work.  The
-    // NameWindowPixmap snapshot + round-trips in getWindowPicture: ensure
-    // we capture a consistent frozen state even with immediate painting.
-    if (self.compositingManager &&
-        [self.compositingManager compositingActive] &&
-        [self.compositingManager hasPendingDamage]) {
-        [self.compositingManager performRepairNow];
-    }
 
     // If we hit the event limit, assume more events may be available
     // Don't poll again here as both xcb_poll_for_event and xcb_poll_for_queued_event
@@ -564,58 +431,6 @@
     URS_PROFILE_END(eventLoop);
 }
 
-- (BOOL)handleSnappingMenuTriggerForButtonPress:(xcb_button_press_event_t *)pressEvent
-{
-    if (!pressEvent || pressEvent->detail != XCB_BUTTON_INDEX_3) {
-        return NO;
-    }
-
-    XCBWindow *window = [connection windowForXCBId:pressEvent->event];
-    if (!window || ![window isKindOfClass:[XCBTitleBar class]]) {
-        return NO;
-    }
-
-    XCBFrame *frame = (XCBFrame *)[window parentWindow];
-    if (!frame || ![frame isKindOfClass:[XCBFrame class]]) {
-        return NO;
-    }
-
-    // The pointer is grabbed in sync mode by default; unfreeze it before menu tracking.
-    xcb_allow_events([connection connection], XCB_ALLOW_ASYNC_POINTER, pressEvent->time);
-
-    NSValue *pressValue =
-        [NSValue valueWithBytes:pressEvent objCType:@encode(xcb_button_press_event_t)];
-    [self performSelector:@selector(showDeferredSnappingMenuForButtonPress:)
-               withObject:pressValue
-               afterDelay:0];
-
-    return YES;
-}
-
-- (void)showDeferredSnappingMenuForButtonPress:(NSValue *)pressValue
-{
-    if (!pressValue) {
-        return;
-    }
-
-    xcb_button_press_event_t pressEvent;
-    [pressValue getValue:&pressEvent];
-
-    XCBWindow *window = [connection windowForXCBId:pressEvent.event];
-    if (!window || ![window isKindOfClass:[XCBTitleBar class]]) {
-        return;
-    }
-
-    XCBFrame *frame = (XCBFrame *)[window parentWindow];
-    if (!frame || ![frame isKindOfClass:[XCBFrame class]]) {
-        return;
-    }
-
-    [self.snappingMenuController showSnappingContextMenuForFrame:frame
-                                                     atX11Point:NSMakePoint(pressEvent.root_x,
-                                                                            pressEvent.root_y)];
-}
-
 - (void)processXCBEvent:(xcb_generic_event_t*)event
 {
     URS_PROFILE_BEGIN(eventDispatch);
@@ -633,21 +448,6 @@
             // Re-apply GSTheme if this is a titlebar expose event
             [self handleTitlebarExpose:exposeEvent];
 
-            // Trigger compositor update for the exposed window
-            if (self.compositingManager && [self.compositingManager compositingActive]) {
-                // Handle expose event to force NameWindowPixmap recreation.
-                // This fixes corruption with fixed-size windows (like About dialogs)
-                // that don't redraw themselves when exposed after being obscured.
-                [self.compositingManager handleExposeEvent:exposeEvent->window];
-
-                // Update the specific window that was exposed for efficient redraw
-                [self.compositingManager updateWindow:exposeEvent->window];
-                // Force immediate repair for expose events (e.g., cursor blinking)
-                // Only on the final expose event in a sequence (count == 0)
-                if (exposeEvent->count == 0) {
-                    [self.compositingManager performRepairNow];
-                }
-            }
             break;
         }
         case XCB_ENTER_NOTIFY: {
@@ -666,9 +466,6 @@
             xcb_focus_in_event_t *focusInEvent = (xcb_focus_in_event_t *)event;
             [connection handleFocusIn:focusInEvent];
             [self handleFocusChange:focusInEvent->event isActive:YES];
-            if (self.compositingManager && [self.compositingManager compositingActive]) {
-                [self.compositingManager markStackingOrderDirty];
-            }
             break;
         }
         case XCB_FOCUS_OUT: {
@@ -685,65 +482,20 @@
         case XCB_BUTTON_PRESS: {
             xcb_button_press_event_t *pressEvent = (xcb_button_press_event_t *)event;
 
-            // Dismiss snapping context menu on any click outside it
-            if (self.snappingMenuController.activeMenu) {
-                NSEvent *syntheticUp = [NSEvent mouseEventWithType:NSLeftMouseUp
-                                                          location:NSMakePoint(-1, -1)
-                                                     modifierFlags:0
-                                                         timestamp:0
-                                                      windowNumber:0
-                                                           context:nil
-                                                       eventNumber:0
-                                                        clickCount:1
-                                                          pressure:0];
-                [NSApp postEvent:syntheticUp atStart:YES];
-                break;
-            }
-
-            // Titlebar right-click opens the snapping menu instead of entering drag/focus path.
-            if ([self handleSnappingMenuTriggerForButtonPress:pressEvent]) {
-                break;
-            }
-
             // Check if this is a button click on a GSThemeTitleBar
             BOOL wasButtonPress = [self.titlebarController handleTitlebarButtonPress:pressEvent];
             if (!wasButtonPress) {
-                // Not a titlebar button. Check for modifier+click on titlebar
-                // with _GW_SPATIAL_PATH atom (spatial path popup).
-                if (![self handleSpatialPathTitleClick:pressEvent]) {
-                    // Not a spatial path click either; let xcbkit handle normally
-                    // This follows the complete XCBKit activation path:
-                    // 1. Focus the client window (WM_TAKE_FOCUS, _NET_ACTIVE_WINDOW, ungrab keyboard)
-                    // 2. Raise the frame
-                    // 3. Update titlebar states (active/inactive for all windows)
-                    [connection handleButtonPress:pressEvent];
-                }
+                // Not a titlebar button: the XCBKit activation path.
+                // 1. Focus the client window (WM_TAKE_FOCUS, _NET_ACTIVE_WINDOW, ungrab keyboard)
+                // 2. Raise the frame
+                // 3. Update titlebar states (active/inactive for all windows)
+                [connection handleButtonPress:pressEvent];
             }
             
-            // Button press typically raises the window (changes stacking order)
-            if (self.compositingManager && [self.compositingManager compositingActive]) {
-                [self.compositingManager markStackingOrderDirty];
-            }
             break;
         }
         case XCB_BUTTON_RELEASE: {
             xcb_button_release_event_t *releaseEvent = (xcb_button_release_event_t *)event;
-
-            // Dismiss snapping context menu on button release outside it
-            // (e.g., user held right-click on titlebar and released off the window)
-            if (self.snappingMenuController.activeMenu) {
-                NSEvent *syntheticUp = [NSEvent mouseEventWithType:NSLeftMouseUp
-                                                          location:NSMakePoint(-1, -1)
-                                                     modifierFlags:0
-                                                         timestamp:0
-                                                      windowNumber:0
-                                                           context:nil
-                                                       eventNumber:0
-                                                        clickCount:1
-                                                          pressure:0];
-                [NSApp postEvent:syntheticUp atStart:YES];
-                break;
-            }
 
             // Title bar buttons act on release
             if ([self.titlebarController handleTitlebarButtonRelease:releaseEvent]) {
@@ -755,46 +507,16 @@
             // After resize completes, update the titlebar with GSTheme
             [self.titlebarController handleResizeComplete:releaseEvent];
 
-            // If this was a move/drag end on a titlebar or frame, refresh compositor pixmap
-            if (self.compositingManager && [self.compositingManager compositingActive]) {
-                XCBWindow *releasedWindow = [connection windowForXCBId:releaseEvent->event];
-                XCBFrame *frame = nil;
-                if ([releasedWindow isKindOfClass:[XCBFrame class]]) {
-                    frame = (XCBFrame *)releasedWindow;
-                } else if ([releasedWindow isKindOfClass:[XCBTitleBar class]]) {
-                    frame = (XCBFrame *)[releasedWindow parentWindow];
-                } else if ([releasedWindow parentWindow] && [[releasedWindow parentWindow] isKindOfClass:[XCBFrame class]]) {
-                    frame = (XCBFrame *)[releasedWindow parentWindow];
-                }
-
-                if (frame) {
-                    [self.compositingManager invalidateWindowPixmap:[frame window]];
-                    [self.compositingManager performRepairNow];
-                }
-            }
             break;
         }
         case XCB_MAP_NOTIFY: {
             xcb_map_notify_event_t *notifyEvent = (xcb_map_notify_event_t *)event;
             [connection handleMapNotify:notifyEvent];
             
-            // Notify compositor of map event
-            if (self.compositingManager && [self.compositingManager compositingActive]) {
-                [self.compositingManager mapWindow:notifyEvent->window];
-                // Track mapped child windows (e.g., GPU/GL subwindows) to receive damage events
-                [self registerChildWindowsForCompositor:notifyEvent->window depth:2];
-            }
             break;
         }
         case XCB_MAP_REQUEST: {
             xcb_map_request_event_t *mapRequestEvent = (xcb_map_request_event_t *)event;
-
-            // GNUstep draws its own decorations, so leave its windows alone.
-            if ([connection windowIsGNUstepClient:mapRequestEvent->window]) {
-                xcb_map_window([connection connection], mapRequestEvent->window);
-                [connection flush];
-                break;
-            }
 
             // Check if this is a dock window with struts
             EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
@@ -819,28 +541,11 @@
             // Unframed windows (menus, popups, tooltips, transients) only need
             // compositor registration — skip theme, focus, and border processing.
             if (!mappedClient || ![[mappedClient parentWindow] isKindOfClass:[XCBFrame class]]) {
-                //NSLog(@"[WindowManager] Unframed window %u - skipping post-processing", mapRequestEvent->window);
-                if (self.compositingManager && [self.compositingManager compositingActive]) {
-                    [self.compositingManager registerWindow:mapRequestEvent->window];
-                }
                 break;
             }
 
             // --- Framed windows only below this point ---
 
-            // Register window with compositor if active
-            if (self.compositingManager && [self.compositingManager compositingActive]) {
-                //NSLog(@"[HybridEventHandler] Registering window %u with compositor (compositingActive=%d)", mapRequestEvent->window, (int)[self.compositingManager compositingActive]);
-                [self.compositingManager registerWindow:mapRequestEvent->window];
-                //NSLog(@"[HybridEventHandler] Registered client window %u", mapRequestEvent->window);
-                // Register any existing child windows so their damage events are tracked
-                [self registerChildWindowsForCompositor:mapRequestEvent->window depth:3];
-                // Register children of the frame too
-                XCBFrame *frame = (XCBFrame *)[mappedClient parentWindow];
-                //NSLog(@"[HybridEventHandler] Registering frame window %u for client %u", [frame window], mapRequestEvent->window);
-                [self.compositingManager registerWindow:[frame window]];
-                [self registerChildWindowsForCompositor:[frame window] depth:3];
-            }
 
             // Hide borders for windows with fixed sizes (like info panels and logout)
             [self adjustBorderForFixedSizeWindow:mapRequestEvent->window];
@@ -895,12 +600,6 @@
             xcb_window_t removedClientId = [self.focusManager clientWindowIdForWindowId:unmapNotifyEvent->window];
             [connection handleUnMapNotify:unmapNotifyEvent];
 
-            // Notify compositor of unmap event. The compositor will remove the
-            // entire logical window group atomically, including decorations,
-            // client content, and any shadows.
-            if (self.compositingManager && [self.compositingManager compositingActive]) {
-                [self.compositingManager unmapWindow:unmapNotifyEvent->window];
-            }
 
             [self.focusManager ensureFocusAfterWindowRemoval:removedClientId];
             break;
@@ -909,10 +608,6 @@
             xcb_destroy_notify_event_t *destroyNotify = (xcb_destroy_notify_event_t *)event;
             xcb_window_t removedClientId = [self.focusManager clientWindowIdForWindowId:destroyNotify->window];
             
-            // Unregister window from compositor before connection handles destroy
-            if (self.compositingManager && [self.compositingManager compositingActive]) {
-                [self.compositingManager unregisterWindow:destroyNotify->window];
-            }
             
             // Remove any struts for this window
             if ([self.workareaManager removeStrutForWindow:destroyNotify->window]) {
@@ -936,39 +631,18 @@
         case XCB_CREATE_NOTIFY: {
             xcb_create_notify_event_t *createNotify = (xcb_create_notify_event_t *)event;
             [connection handleCreateNotify:createNotify];
-            // Track newly created child windows for damage (e.g., GL subwindows)
-            if (self.compositingManager && [self.compositingManager compositingActive]) {
-                [self.compositingManager registerWindow:createNotify->window];
-                [self registerChildWindowsForCompositor:createNotify->window depth:2];
-            }
             break;
         }
         case XCB_CONFIGURE_NOTIFY: {
             xcb_configure_notify_event_t *configureNotify = (xcb_configure_notify_event_t *)event;
             [connection handleConfigureNotify:configureNotify];
             
-            // Notify compositor of window resize/move
-            if (self.compositingManager && [self.compositingManager compositingActive]) {
-                [self.compositingManager resizeWindow:configureNotify->window 
-                                                    x:configureNotify->x
-                                                    y:configureNotify->y
-                                                width:configureNotify->width
-                                               height:configureNotify->height];
-                // Stacking can also change via ConfigureNotify (stack mode), ensure repaint
-                [self.compositingManager markStackingOrderDirty];
-            }
             break;
         }
         case XCB_REPARENT_NOTIFY: {
             xcb_reparent_notify_event_t *reparentNotify = (xcb_reparent_notify_event_t *)event;
             [connection handleReparentNotify:reparentNotify];
 
-            if (self.compositingManager && [self.compositingManager compositingActive]) {
-                // Re-register to refresh parent/geometry and avoid stale artifacts
-                [self.compositingManager unregisterWindow:reparentNotify->window];
-                [self.compositingManager registerWindow:reparentNotify->window];
-                [self.compositingManager scheduleComposite];
-            }
             break;
         }
         case XCB_PROPERTY_NOTIFY: {
@@ -979,62 +653,17 @@
             [connection handlePropertyNotify:propEvent];
             break;
         }
-        case XCB_KEY_PRESS: {
-            xcb_key_press_event_t *keyPressEvent = (xcb_key_press_event_t *)event;
-            [self.keyboardManager handleKeyPress:keyPressEvent];
-            break;
-        }
-        case XCB_KEY_RELEASE: {
-            xcb_key_release_event_t *keyReleaseEvent = (xcb_key_release_event_t *)event;
-            [self.keyboardManager handleKeyRelease:keyReleaseEvent];
-            break;
-        }
         case XCB_SELECTION_CLEAR: {
             xcb_selection_clear_event_t *selectionClearEvent = (xcb_selection_clear_event_t *)event;
             [self handleSelectionClear:selectionClearEvent];
             break;
         }
         default: {
-            // Check for extension events (damage, etc.)
-            // Only log truly unhandled events (not damage events)
-            uint8_t responseType = event->response_type & ~0x80;
-            uint8_t damageBase = self.compositingManager ? [self.compositingManager damageEventBase] : 0;
-            if (responseType > 64 && responseType != damageBase) { // Extension events except DAMAGE
-                //NSLog(@"[Event] Unhandled extension event: response_type=%u", responseType);
-            }
             [self handleExtensionEvent:event];
             break;
         }
     }
     URS_PROFILE_END(eventDispatch);
-}
-
-- (void)registerChildWindowsForCompositor:(xcb_window_t)parentWindow depth:(NSUInteger)depth
-{
-    if (!self.compositingManager || ![self.compositingManager compositingActive]) {
-        return;
-    }
-    if (depth == 0 || parentWindow == XCB_NONE) {
-        return;
-    }
-
-    xcb_connection_t *xcbConn = [connection connection];
-    xcb_query_tree_cookie_t tree_cookie = xcb_query_tree(xcbConn, parentWindow);
-    xcb_query_tree_reply_t *tree_reply = xcb_query_tree_reply(xcbConn, tree_cookie, NULL);
-    if (!tree_reply) {
-        return;
-    }
-
-    xcb_window_t *children = xcb_query_tree_children(tree_reply);
-    int num_children = xcb_query_tree_children_length(tree_reply);
-
-    for (int i = 0; i < num_children; i++) {
-        xcb_window_t child = children[i];
-        [self.compositingManager registerWindow:child];
-        [self registerChildWindowsForCompositor:child depth:depth - 1];
-    }
-
-    free(tree_reply);
 }
 
 - (BOOL)eventNeedsFlush:(xcb_generic_event_t*)event
@@ -1143,10 +772,6 @@
     // Recalculate workarea (updates _NET_WORKAREA from new screen dims)
     [self.workareaManager recalculateWorkarea];
 
-    // Notify compositor if active so it can recreate backing pixmaps etc.
-    if (self.compositingManager && [self.compositingManager compositingActive]) {
-        [self.compositingManager handleScreenSizeChange:newW height:newH];
-    }
 }
 
 - (void)handleExtensionEvent:(xcb_generic_event_t*)event
@@ -1178,31 +803,6 @@
             }
             return;
         }
-    }
-
-    // Remaining extension events (DAMAGE, Present) require compositing
-    if (!self.compositingManager) {
-        return;
-    }
-
-    uint8_t damageEventBase = [self.compositingManager damageEventBase];
-    uint8_t presentEventBase = [self.compositingManager presentEventBase];
-
-    // X Present extension: vblank-synced composite complete
-    if (presentEventBase > 0 && responseType == presentEventBase + XCB_PRESENT_COMPLETE_NOTIFY) {
-        [self.compositingManager handlePresentComplete:event];
-        return;
-    }
-    if (presentEventBase > 0 && responseType == presentEventBase + XCB_PRESENT_IDLE_NOTIFY) {
-        [self.compositingManager handlePresentIdle];
-        return;
-    }
-
-    // DAMAGE notify events are at base_event + XCB_DAMAGE_NOTIFY (0)
-    if (responseType == damageEventBase + XCB_DAMAGE_NOTIFY) {
-        xcb_damage_notify_event_t *damageEvent = (xcb_damage_notify_event_t *)event;
-        [self.compositingManager handleDamageNotify:damageEvent->drawable];
-        return;
     }
 }
 
@@ -1327,25 +927,6 @@
         [titlebar drawArea:[titlebar windowRect]];
         [connection flush];
         
-        // Notify compositor about the titlebar content change.
-        // Explicitly invalidate the compositor's picture cache so the next
-        // paint cycle reads fresh backing-pixmap content rather than stale
-        // cached pixels.
-        if (self.compositingManager && [self.compositingManager compositingActive]) {
-            // Invalidate ALL frames in the compositor so every window's
-            // decorations are re-snapshotted.  When the active window
-            // changes, one titlebar becomes active and another inactive;
-            // the compositor must re-read every frame to reflect this.
-            NSDictionary *allWindows = [connection windowsMap];
-            for (NSString *wid in allWindows) {
-                XCBWindow *win = [allWindows objectForKey:wid];
-                if (win && [win isKindOfClass:[XCBFrame class]]) {
-                    [self.compositingManager invalidateWindowPixmap:[win window]];
-                }
-            }
-            [self.compositingManager markStackingOrderDirty];
-            [self.compositingManager performRepairNow];
-        }
 
     } @catch (NSException *exception) {
         NSLog(@"Exception in handleFocusChange: %@", exception.reason);
@@ -1383,7 +964,6 @@
 }
 
 - (void)refreshAllManagedWindows {
-    xcb_window_t focusedId = self.focusManager.lastFocusedWindowId;
     NSDictionary *windowsMap = [connection windowsMap];
     for (NSString *mapWindowId in windowsMap) {
         XCBWindow *mapWindow = [windowsMap objectForKey:mapWindowId];
@@ -1396,13 +976,10 @@
             continue;
         }
         XCBTitleBar *titlebar = (XCBTitleBar *)titlebarWindow;
-        XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
-
         // Title bar / resize bar sizes may differ in the new theme
         [frame relayoutForCurrentTheme];
 
-        BOOL isActive = (focusedId != XCB_NONE && clientWindow != nil &&
-                         [clientWindow window] == focusedId);
+        BOOL isActive = [self.focusManager isFrameFocused:frame];
         uint32_t borderPixel = [URSDecorationMetrics borderPixel];
         if (![frame use32BitDepth])
             borderPixel &= 0x00FFFFFF;
@@ -1419,15 +996,8 @@
         }
         [frame renderResizeBar];
         [frame applyCornerShape];
-        if (self.compositingManager && [self.compositingManager compositingActive]) {
-            [self.compositingManager invalidateWindowPixmap:[frame window]];
-        }
     }
     [connection flush];
-    if (self.compositingManager && [self.compositingManager compositingActive]) {
-        [self.compositingManager markStackingOrderDirty];
-        [self.compositingManager performRepairNow];
-    }
 }
 
 - (void)handleTitlebarExpose:(xcb_expose_event_t*)exposeEvent {
@@ -1447,10 +1017,7 @@
         XCBTitleBar *titlebar = (XCBTitleBar *)exposed;
         XCBFrame *frame = (XCBFrame *)[titlebar parentWindow];
 
-        XCBWindow *exposeClient = [frame childWindowForKey:ClientWindow];
-        BOOL exposeIsActive = (self.focusManager.lastFocusedWindowId != XCB_NONE &&
-                               exposeClient != nil &&
-                               [exposeClient window] == self.focusManager.lastFocusedWindowId);
+        BOOL exposeIsActive = [self.focusManager isFrameFocused:frame];
 
         // Draw the pixmap into the window backing store so the compositor
         // captures themed content on its next paint.
@@ -1732,10 +1299,6 @@
                             [titlebar drawArea:[titlebar windowRect]];
                             [self.connection flush];
 
-                            // Notify compositor about the new window content
-                            if (self.compositingManager && [self.compositingManager compositingActive]) {
-                                [self.compositingManager updateWindow:[frame window]];
-                            }
 
                             // Auto-focus the client window - the frame and titlebar are now fully set up
                             // Focus after a small delay to ensure the window is properly rendered and ready
@@ -1792,10 +1355,7 @@
 
                 if (frameTitle && frameTitle == titlebar) {
                     // Determine whether this window actually has keyboard focus
-                    XCBWindow *reapplyClient = [frame childWindowForKey:ClientWindow];
-                    BOOL reapplyIsActive = (self.focusManager.lastFocusedWindowId != XCB_NONE &&
-                                            reapplyClient != nil &&
-                                            [reapplyClient window] == self.focusManager.lastFocusedWindowId);
+                    BOOL reapplyIsActive = [self.focusManager isFrameFocused:frame];
 
                     // Reapply GSTheme rendering
                     [URSThemeIntegration renderGSThemeToWindow:window
@@ -1804,10 +1364,6 @@
                                                         active:reapplyIsActive];
                     //NSLog(@"GSTheme reapplied to titlebar: %@", titlebar.windowTitle);
                     
-                    // Notify compositor about the content change
-                    if (self.compositingManager && [self.compositingManager compositingActive]) {
-                        [self.compositingManager updateWindow:[frame window]];
-                    }
                     return;
                 }
             }
@@ -1823,244 +1379,11 @@
 #pragma mark - Spatial Path Popup (modifier+click on titlebar)
 
 /* Read a UTF-8 string property from an X11 window */
-- (NSString *)readStringProperty:(xcb_atom_t)propertyAtom
-                        forWindow:(xcb_window_t)windowId
-{
-    if (!propertyAtom || !windowId) return nil;
-
-    xcb_connection_t *c = [self.connection connection];
-    xcb_atom_t utf8Atom = [[XCBAtomService sharedInstanceWithConnection:self.connection]
-                           atomFromCachedAtomsWithKey:@"UTF8_STRING"];
-    if (!utf8Atom) {
-        utf8Atom = [[XCBAtomService sharedInstanceWithConnection:self.connection]
-                    cacheAtom:@"UTF8_STRING"];
-    }
-
-    xcb_get_property_cookie_t cookie = xcb_get_property(c, 0, windowId,
-                                                         propertyAtom, utf8Atom,
-                                                         0, 4096);
-    xcb_generic_error_t *err = NULL;
-    xcb_get_property_reply_t *reply = xcb_get_property_reply(c, cookie, &err);
-    if (err) { free(err); return nil; }
-    if (!reply) return nil;
-
-    int len = xcb_get_property_value_length(reply);
-    NSString *value = nil;
-    if (len > 0) {
-        value = [[NSString alloc] initWithBytes:xcb_get_property_value(reply)
-                                         length:(NSUInteger)len
-                                       encoding:NSUTF8StringEncoding];
-    }
-    free(reply);
-    return value;
-}
 
 /* Handle a modifier+click on a titlebar that has _GW_SPATIAL_PATH set.
  * Returns YES if the event was consumed (popup shown). */
-- (BOOL)handleSpatialPathTitleClick:(xcb_button_press_event_t *)pressEvent
-{
-    if (!pressEvent) return NO;
-
-    /* Only left-click (button 1) with Control or Alt modifier */
-    if (pressEvent->detail != XCB_BUTTON_INDEX_1)
-        return NO;
-
-    BOOL hasCtrl = (pressEvent->state & XCB_MOD_MASK_CONTROL) != 0;
-    BOOL hasAlt  = (pressEvent->state & XCB_KEY_BUT_MASK_MOD_1) != 0;
-    if (!hasCtrl && !hasAlt)
-        return NO;
-
-    /* Find the titlebar window */
-    XCBWindow *window = [self.connection windowForXCBId:pressEvent->event];
-    if (!window || ![window isKindOfClass:[XCBTitleBar class]])
-        return NO;
-
-    XCBTitleBar *titlebar = (XCBTitleBar *)window;
-    XCBFrame *frame = (XCBFrame *)[titlebar parentWindow];
-    if (!frame || ![frame isKindOfClass:[XCBFrame class]])
-        return NO;
-
-    XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
-    if (!clientWindow)
-        return NO;
-
-    xcb_window_t clientId = [clientWindow window];
-
-    /* Read _GW_SPATIAL_PATH atom from the client window */
-    XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:self.connection];
-    xcb_atom_t spatialPathAtom = [atomService atomFromCachedAtomsWithKey:@"_GW_SPATIAL_PATH"];
-    if (spatialPathAtom == XCB_ATOM_NONE) {
-        spatialPathAtom = [atomService cacheAtom:@"_GW_SPATIAL_PATH"];
-    }
-
-    NSString *spatialPath = [self readStringProperty:spatialPathAtom
-                                           forWindow:clientId];
-    if (!spatialPath || [spatialPath length] == 0)
-        return NO;
-
-    //NSLog(@"[SpatialPath] Modifier+click on titlebar for client %u, path='%@'",
-          //clientId, spatialPath);
-
-    /* Release the implicit grab so the menu can track */
-    xcb_allow_events([self.connection connection],
-                     XCB_ALLOW_ASYNC_POINTER, pressEvent->time);
-
-    /* Build path components matching GWViewerPathsPopUp's behavior.
-     * NSString's -pathComponents returns the root "/" as a proper component,
-     * unlike componentsSeparatedByString:@"/" which drops it to an empty string. */
-    NSArray *components = [spatialPath pathComponents];
-    NSString *progPath = nil;
-    NSMenu *menu = [[NSMenu alloc] initWithTitle:@""];
-
-    for (NSString *comp in components) {
-        if ([comp isEqualToString:@"/"]) {
-            progPath = @"/";
-        } else if (progPath == nil) {
-            progPath = comp;
-        } else if ([progPath isEqualToString:@"/"]) {
-            progPath = [progPath stringByAppendingPathComponent:comp];
-        } else {
-            progPath = [progPath stringByAppendingPathComponent:comp];
-        }
-
-        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:comp
-                                                       action:@selector(spatialPathMenuItemSelected:)
-                                                keyEquivalent:@""];
-        [item setTarget:self];
-        [item setRepresentedObject:progPath];
-        [menu addItem:item];
-    }
-
-    if ([menu numberOfItems] == 0) {
-        return NO;
-    }
-
-    /* Show the menu centered on the titlebar */
-    XCBRect titlebarRect = [titlebar windowRect];
-    XCBRect frameRect = [frame windowRect];
-    XCBScreen *screen = [[self.connection screens] objectAtIndex:0];
-    uint16_t screenHeight = [screen height];
-
-    /* Position at center of the titlebar, in GNUstep Y-flipped coordinates */
-    CGFloat centerX = frameRect.position.x + (titlebarRect.size.width / 2.0);
-    CGFloat centerY = screenHeight - frameRect.position.y - (titlebarRect.size.height / 2.0);
-    NSPoint menuLocation = NSMakePoint(centerX, centerY);
-
-    NSEvent *menuEvent = [NSEvent mouseEventWithType:NSLeftMouseDown
-                                            location:menuLocation
-                                       modifierFlags:0
-                                           timestamp:0
-                                        windowNumber:0
-                                             context:nil
-                                         eventNumber:0
-                                          clickCount:1
-                                            pressure:0];
-
-    /* Store reference to the client window for the menu action */
-    _spatialPathClientWindow = clientId;
-
-    //NSLog(@"[SpatialPath] Showing path popup at (%.0f, %.0f) for '%@'",
-          //menuLocation.x, menuLocation.y, spatialPath);
-
-    [NSMenu popUpContextMenu:menu withEvent:menuEvent forView:nil];
-
-    return YES;
-}
 
 /* Called when the user selects a path from the spatial path popup */
-- (void)spatialPathMenuItemSelected:(NSMenuItem *)sender
-{
-    NSString *targetPath = [sender representedObject];
-    if (!targetPath || _spatialPathClientWindow == XCB_NONE) {
-        return;
-    }
-
-    //NSLog(@"[SpatialPath] User selected path '%@' for client window %u",
-          //targetPath, _spatialPathClientWindow);
-
-    /* Write the target path to _GW_SPATIAL_NAVIGATE on the client window */
-    XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:self.connection];
-    xcb_atom_t navAtom = [atomService atomFromCachedAtomsWithKey:@"_GW_SPATIAL_NAVIGATE"];
-    if (navAtom == XCB_ATOM_NONE) {
-        navAtom = [atomService cacheAtom:@"_GW_SPATIAL_NAVIGATE"];
-    }
-
-    xcb_atom_t utf8Atom = [atomService atomFromCachedAtomsWithKey:@"UTF8_STRING"];
-    if (utf8Atom == XCB_ATOM_NONE) {
-        utf8Atom = [atomService cacheAtom:@"UTF8_STRING"];
-    }
-
-    const char *cpath = [targetPath UTF8String];
-    xcb_change_property([self.connection connection],
-                        XCB_PROP_MODE_REPLACE,
-                        _spatialPathClientWindow,
-                        navAtom,
-                        utf8Atom,
-                        8,  /* 8-bit data */
-                        (uint32_t)strlen(cpath),
-                        cpath);
-    [self.connection flush];
-
-    //NSLog(@"[SpatialPath] Wrote '%@' to _GW_SPATIAL_NAVIGATE on window %u",
-          //targetPath, _spatialPathClientWindow);
-
-    _spatialPathClientWindow = XCB_NONE;
-}
-
-// Handle compositor updates during window drag or resize
-- (void)handleCompositingDuringMotion:(xcb_motion_notify_event_t*)motionEvent {
-    if (!self.compositingManager || ![self.compositingManager compositingActive]) {
-        return;
-    }
-    
-    @try {
-        // Check if this is a drag operation (window being moved)
-        if ([connection dragState]) {
-            // Find the titlebar being dragged
-            XCBWindow *window = [connection windowForXCBId:motionEvent->event];
-            if (!window || ![window isKindOfClass:[XCBTitleBar class]]) {
-                return;
-            }
-            
-            XCBFrame *frame = (XCBFrame*)[window parentWindow];
-            if (!frame || ![frame isKindOfClass:[XCBFrame class]]) {
-                return;
-            }
-            
-            // Get the frame's current position (after moveTo: was called)
-            XCBRect frameRect = [frame windowRect];
-            
-            // Notify compositor of window move (efficient - doesn't recreate picture)
-            [self.compositingManager moveWindow:[frame window] 
-                                              x:frameRect.position.x 
-                                              y:frameRect.position.y];
-            
-            // Perform immediate repair during drag for responsive visual feedback
-            [self.compositingManager performRepairNow];
-        } else if ([connection resizeState]) {
-            // Resize case - already handled by handleResizeDuringMotion, but ensure compositor updates
-            XCBWindow *window = [connection windowForXCBId:motionEvent->event];
-            XCBFrame *frame = nil;
-            
-            if ([window isKindOfClass:[XCBFrame class]]) {
-                frame = (XCBFrame*)window;
-            }
-            
-            if (frame) {
-                XCBRect frameRect = [frame windowRect];
-                [self.compositingManager resizeWindow:[frame window]
-                                                    x:frameRect.position.x
-                                                    y:frameRect.position.y
-                                                width:frameRect.size.width
-                                               height:frameRect.size.height];
-                // Compositor repaints at its own cadence; no need to force full repair
-                // on every motion pixel (that would stall the resize pipeline).
-            }
-        }
-    } @catch (NSException *exception) {
-        // Silently ignore exceptions during motion to avoid spam
-    }
-}
 
 #pragma mark - Cleanup
 
@@ -2097,17 +1420,7 @@
     //NSLog(@"[WindowManager] ========== Starting comprehensive cleanup ==========");
     
     @try {
-        // Step 0: Clean up compositing if active
-        if (self.compositingManager && [self.compositingManager compositingActive]) {
-            //NSLog(@"[WindowManager] Step 0: Deactivating compositing");
-            [self.compositingManager deactivateCompositing];
-            [self.compositingManager cleanup];
-            self.compositingManager = nil;
-        }
         
-        // Step 1: Clean up keyboard grabs
-        //NSLog(@"[WindowManager] Step 1: Cleaning up keyboard grabs");
-        [self.keyboardManager cleanupKeyboardGrabbing];
         
         // Step 2: Undecorate and restore all client windows
         //NSLog(@"[WindowManager] Step 2: Restoring all client windows");
@@ -2525,10 +1838,7 @@
     if ([[URSThemeIntegration sharedInstance] enabled]) {
         // Use the focus manager to determine active state — frame.isFocused
         // is never actually set anywhere, so it's always NO.
-        XCBWindow *titleClient = [frame childWindowForKey:ClientWindow];
-        BOOL isActive = (self.focusManager.lastFocusedWindowId != XCB_NONE &&
-                         titleClient != nil &&
-                         [titleClient window] == self.focusManager.lastFocusedWindowId);
+        BOOL isActive = [self.focusManager isFrameFocused:frame];
         [URSThemeIntegration renderGSThemeToWindow:frame
                                              frame:frame
                                              title:newTitle
@@ -2548,9 +1858,6 @@
 
 - (void)dealloc
 {
-    // Clean up keyboard grabs first
-    [self.keyboardManager cleanupKeyboardGrabbing];
-
     // Remove from run loop if integrated - must match all modes added in setupXCBEventIntegration
     if (self.xcbEventsIntegrated && connection) {
         int xcbFD = xcb_get_file_descriptor([connection connection]);
@@ -2580,11 +1887,40 @@
 - (void)focusWindowAfterThemeApplied:(XCBWindow *)clientWindow
 {
     [self.focusManager focusWindowAfterThemeApplied:clientWindow];
+    [self redrawFocusedTitlebar];
 }
 
 - (void)focusNewlyMappedWindow:(XCBWindow *)clientWindow
 {
     [self.focusManager focusNewlyMappedWindow:clientWindow];
+    [self redrawFocusedTitlebar];
+}
+
+// A new window got the focus without a FocusIn reaching us (its title bar
+// was drawn, and maybe redrawn by an expose or a title change, before it
+// had the focus): draw every title bar in its current state.
+- (void)redrawFocusedTitlebar
+{
+    NSDictionary *windowsMap = [connection windowsMap];
+
+    for (NSString *key in windowsMap) {
+        XCBWindow *w = [windowsMap objectForKey:key];
+        XCBTitleBar *titlebar;
+
+        if (![w isKindOfClass:[XCBFrame class]])
+            continue;
+        titlebar = (XCBTitleBar *)[(XCBFrame *)w childWindowForKey:TitleBar];
+        if (![titlebar isKindOfClass:[XCBTitleBar class]])
+            continue;
+        if ([URSThemeIntegration renderGSThemeToWindow:w
+                                                 frame:(XCBFrame *)w
+                                                 title:[titlebar windowTitle]
+                                                active:[self.focusManager isFrameFocused:(XCBFrame *)w]]) {
+            [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
+            [titlebar drawArea:[titlebar windowRect]];
+        }
+    }
+    [connection flush];
 }
 
 - (void)removeWindowFromRecentlyFocused:(NSNumber *)windowIdNum

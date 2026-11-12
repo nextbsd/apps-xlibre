@@ -116,6 +116,9 @@ static XCBConnection *sharedInstance;
     needFlush = NO;
     dragState = NO;
     isAWindowManager = isWindowManager;
+    // Where new windows go when they don't ask for a place.
+    self.placementX = 22;
+    self.placementY = 44;
 
     if (aDisplay == NULL)
     {
@@ -295,19 +298,6 @@ static XCBConnection *sharedInstance;
 
     ewmhService = nil;
     key = nil;
-}
-
-- (BOOL)windowIsGNUstepClient:(xcb_window_t)aWindow
-{
-    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
-    xcb_get_property_cookie_t cookie =
-        xcb_get_property(connection, 0, aWindow,
-                         [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService GNUStepWmAttr]],
-                         XCB_GET_PROPERTY_TYPE_ANY, 0, sizeof(uint32_t) * 4);
-    xcb_get_property_reply_t *reply = xcb_get_property_reply(connection, cookie, NULL);
-    BOOL isGNUstep = reply != NULL && xcb_get_property_value_length(reply) > 0;
-    free(reply);
-    return isGNUstep;
 }
 
 - (void)restackDockWindowsAbove
@@ -1093,9 +1083,9 @@ static XCBConnection *sharedInstance;
                                 yPos = (screenHeight - reqH) * 0.381966;
                                 //NSLog(@"[MapRequest] Applying golden ratio placement (undecorated) for dialog window %u: %d, %d", [window window], xPos, yPos);
                             } else {
-                                // Other windows: 22 px from left, 44 px from top
-                                xPos = 22;
-                                yPos = 44;
+                                // Other windows: the placement offset
+                                xPos = self.placementX;
+                                yPos = self.placementY;
                                 //NSLog(@"[MapRequest] Applying default placement (undecorated) for window %u: %d, %d", [window window], xPos, yPos);
                             }
                             XCBRect newRect = winRect;
@@ -1118,9 +1108,9 @@ static XCBConnection *sharedInstance;
                             yPos = (screenHeight - reqH) * 0.381966;
                             //NSLog(@"[MapRequest] Applying golden ratio placement (undecorated) for dialog window %u: %d, %d", [window window], xPos, yPos);
                         } else {
-                            // Other windows: 22 px from left, 44 px from top
-                            xPos = 22;
-                            yPos = 44;
+                            // Other windows: the placement offset
+                            xPos = self.placementX;
+                            yPos = self.placementY;
                             //NSLog(@"[MapRequest] Applying default placement (undecorated) for window %u: %d, %d", [window window], xPos, yPos);
                         }
                         XCBRect newRect = winRect;
@@ -1554,32 +1544,12 @@ static XCBConnection *sharedInstance;
     // When adopting pre-existing windows at startup, never reposition them.
     // Otherwise, reposition if the app hasn't explicitly specified a position.
     // Dialogs get centered (golden ratio) placement; other windows get a
-    // top-left offset (22 px from left, 44 px from top).
+    // top-left offset (placementX, placementY: 22 and 44 px unless set).
     BOOL shouldReposition = NO;
     BOOL isDialog = NO;
 
     if (!self.adoptingExistingWindows) {
-        // Check _GNUSTEP_WM_ATTR: GNUstep apps set this on all their windows.
-        // If present, the app manages its own positioning (including centering
-        // of alert/modal panels) and the WM must not override it.
-        BOOL isGNUstepApp = NO;
-        if (ewmhService != nil) {
-            xcb_get_property_cookie_t gsCookie =
-                xcb_get_property([self connection], 0, [window window],
-                                 [[ewmhService atomService]
-                                    atomFromCachedAtomsWithKey: [ewmhService GNUStepWmAttr]],
-                                 XCB_GET_PROPERTY_TYPE_ANY, 0, sizeof(uint32_t) * 4);
-            xcb_generic_error_t *gsErr = NULL;
-            xcb_get_property_reply_t *gsReply =
-                xcb_get_property_reply([self connection], gsCookie, &gsErr);
-            if (gsReply != NULL) {
-                isGNUstepApp = (xcb_get_property_value_length(gsReply) > 0);
-                free(gsReply);
-            }
-            if (gsErr) free(gsErr);
-        }
-
-        if (!isGNUstepApp) {
+        {
             BOOL isAtDefaultPos = NO;
             if (screen) {
                 int16_t screenHeight = [screen screen]->height_in_pixels;
@@ -1608,8 +1578,6 @@ static XCBConnection *sharedInstance;
                     }
                 }
             }
-        } else {
-            //NSLog(@"[MapRequest] GNUstep window %u — skipping WM placement override", [window window]);
         }
     } else {
         //NSLog(@"[MapRequest] Skipping WM placement override for adopted window %u", [window window]);
@@ -1647,9 +1615,9 @@ static XCBConnection *sharedInstance;
             yPos = (screenHeight - winHeight) * 0.381966; // Golden ratio from top
             //NSLog(@"[MapRequest] Applying golden ratio placement for dialog window %u: %d, %d", [window window], xPos, yPos);
         } else {
-            // Other windows: 22 px from left, 44 px from top
-            xPos = 22;
-            yPos = 44;
+            // Other windows: the placement offset
+            xPos = self.placementX;
+            yPos = self.placementY;
             //NSLog(@"[MapRequest] Applying default placement for window %u: %d, %d", [window window], xPos, yPos);
         }
 
@@ -2016,74 +1984,6 @@ static XCBConnection *sharedInstance;
         XCBPoint destPoint = XCBMakePoint(destX, destY);
         [frame moveTo:destPoint];
         [frame configureClient];
-
-        // Edge and corner snap detection - check if mouse is near screen edges/corners
-        if (self.workareaValid) {
-            SnapZone detectedZone = SnapZoneNone;
-
-            // Calculate edge proximity (within SNAP_EDGE_THRESHOLD of edge)
-            BOOL nearTop = mouseY <= _cachedWorkareaY + SNAP_EDGE_THRESHOLD;
-            BOOL nearBottom = mouseY >= _cachedWorkareaY + (int32_t)_cachedWorkareaHeight - SNAP_EDGE_THRESHOLD;
-            BOOL nearLeft = mouseX <= _cachedWorkareaX + SNAP_EDGE_THRESHOLD;
-            BOOL nearRight = mouseX >= _cachedWorkareaX + (int32_t)_cachedWorkareaWidth - SNAP_EDGE_THRESHOLD;
-
-            // Corner zones: within SNAP_CORNER_THRESHOLD of the corner
-            // These define rectangular areas in each corner where quarter-snap triggers
-            BOOL inLeftCornerZone = mouseX <= _cachedWorkareaX + SNAP_CORNER_THRESHOLD;
-            BOOL inRightCornerZone = mouseX >= _cachedWorkareaX + (int32_t)_cachedWorkareaWidth - SNAP_CORNER_THRESHOLD;
-            BOOL inTopCornerZone = mouseY <= _cachedWorkareaY + SNAP_CORNER_THRESHOLD;
-            BOOL inBottomCornerZone = mouseY >= _cachedWorkareaY + (int32_t)_cachedWorkareaHeight - SNAP_CORNER_THRESHOLD;
-
-            // Corners: must be near an edge AND in the corner zone of the perpendicular edge
-            // e.g., TopLeft = near top edge AND in the left corner zone (not just near left edge)
-            if (nearTop && inLeftCornerZone && inTopCornerZone) {
-                detectedZone = SnapZoneTopLeft;
-            } else if (nearTop && inRightCornerZone && inTopCornerZone) {
-                detectedZone = SnapZoneTopRight;
-            } else if (nearBottom && inLeftCornerZone && inBottomCornerZone) {
-                detectedZone = SnapZoneBottomLeft;
-            } else if (nearBottom && inRightCornerZone && inBottomCornerZone) {
-                detectedZone = SnapZoneBottomRight;
-            } else if (nearLeft && inTopCornerZone && inLeftCornerZone) {
-                detectedZone = SnapZoneTopLeft;
-            } else if (nearLeft && inBottomCornerZone && inLeftCornerZone) {
-                detectedZone = SnapZoneBottomLeft;
-            } else if (nearRight && inTopCornerZone && inRightCornerZone) {
-                detectedZone = SnapZoneTopRight;
-            } else if (nearRight && inBottomCornerZone && inRightCornerZone) {
-                detectedZone = SnapZoneBottomRight;
-            }
-            // Edges: must be near edge but NOT in a corner zone
-            else if (nearTop && !inLeftCornerZone && !inRightCornerZone) {
-                detectedZone = SnapZoneTop;
-            } else if (nearLeft && !inTopCornerZone && !inBottomCornerZone) {
-                detectedZone = SnapZoneLeft;
-            } else if (nearRight && !inTopCornerZone && !inBottomCornerZone) {
-                detectedZone = SnapZoneRight;
-            }
-
-            // State machine: track zone entry time, show preview after linger
-            if (detectedZone != self.pendingSnapZone) {
-                // Entered a new zone (or left all zones)
-                if (detectedZone != SnapZoneNone) {
-                    //NSLog(@"[Snap] Entered zone %ld (was %ld)", (long)detectedZone, (long)self.pendingSnapZone);
-                }
-                self.pendingSnapZone = detectedZone;
-                self.snapZoneEntryTime = anEvent->time;
-                if (self.snapPreviewShown) {
-                    [self hideSnapPreview];
-                    self.snapPreviewShown = NO;
-                }
-            } else if (detectedZone != SnapZoneNone) {
-                // Still in the same zone - check if linger time has elapsed
-                xcb_timestamp_t elapsed = anEvent->time - self.snapZoneEntryTime;
-                if (elapsed >= SNAP_LINGER_TIME && !self.snapPreviewShown) {
-                    //NSLog(@"[Snap] Linger time elapsed, showing preview for zone %ld", (long)detectedZone);
-                    [self showSnapPreviewForZone:detectedZone frame:frame];
-                    self.snapPreviewShown = YES;
-                }
-            }
-        }
 
         window = nil;
         frame = nil;
@@ -2696,26 +2596,6 @@ static XCBConnection *sharedInstance;
         clientWindow = nil;
     }*/
 
-    // Execute snap if preview was shown and we're in a snap zone
-    if (self.snapPreviewShown && self.pendingSnapZone != SnapZoneNone) {
-        // Get the frame from the titlebar if we were dragging it
-        XCBFrame *snapFrame = nil;
-        if ([window isKindOfClass:[XCBTitleBar class]]) {
-            snapFrame = (XCBFrame *)[window parentWindow];
-        } else if ([window isKindOfClass:[XCBFrame class]]) {
-            snapFrame = (XCBFrame *)window;
-        }
-
-        if (snapFrame) {
-            [self executeSnapForZone:self.pendingSnapZone frame:snapFrame];
-        }
-    }
-
-    // Always clean up snap state
-    [self hideSnapPreview];
-    self.pendingSnapZone = SnapZoneNone;
-    self.snapPreviewShown = NO;
-
     // Always ungrab pointer directly — the release may arrive on a different window
     // than the one that was grabbed (e.g., frame vs titlebar), so we can't rely on
     // the per-window pointerGrabbed flag.
@@ -2954,43 +2834,6 @@ static XCBConnection *sharedInstance;
     XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:self];
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
     NSString *atomMessageName = [atomService atomNameFromAtom:anEvent->type];
-
-    // Handle Gershwin-specific window commands
-    if ([atomMessageName isEqualToString:@"_GERSHWIN_CENTER_WINDOW"]) {
-        //NSLog(@"[ClientMessage] Center Window requested");
-        [self centerActiveWindow];
-        return;
-    }
-    if ([atomMessageName isEqualToString:@"_GERSHWIN_TILE_LEFT"]) {
-        //NSLog(@"[ClientMessage] Tile Left requested");
-        [self tileActiveWindowLeft];
-        return;
-    }
-    if ([atomMessageName isEqualToString:@"_GERSHWIN_TILE_RIGHT"]) {
-        //NSLog(@"[ClientMessage] Tile Right requested");
-        [self tileActiveWindowRight];
-        return;
-    }
-    if ([atomMessageName isEqualToString:@"_GERSHWIN_TILE_TOP_LEFT"]) {
-        //NSLog(@"[ClientMessage] Tile Top Left requested");
-        [self tileActiveWindowToZone:SnapZoneTopLeft];
-        return;
-    }
-    if ([atomMessageName isEqualToString:@"_GERSHWIN_TILE_TOP_RIGHT"]) {
-        //NSLog(@"[ClientMessage] Tile Top Right requested");
-        [self tileActiveWindowToZone:SnapZoneTopRight];
-        return;
-    }
-    if ([atomMessageName isEqualToString:@"_GERSHWIN_TILE_BOTTOM_LEFT"]) {
-        //NSLog(@"[ClientMessage] Tile Bottom Left requested");
-        [self tileActiveWindowToZone:SnapZoneBottomLeft];
-        return;
-    }
-    if ([atomMessageName isEqualToString:@"_GERSHWIN_TILE_BOTTOM_RIGHT"]) {
-        //NSLog(@"[ClientMessage] Tile Bottom Right requested");
-        [self tileActiveWindowToZone:SnapZoneBottomRight];
-        return;
-    }
 
     XCBWindow *window;
     XCBTitleBar *titleBar;
@@ -3905,231 +3748,6 @@ static XCBConnection *sharedInstance;
 
 #pragma mark - Window Snap/Tiling
 
-- (void)executeSnapForZone:(SnapZone)zone frame:(XCBFrame *)frame {
-    if (!frame || zone == SnapZoneNone) {
-        //NSLog(@"[Snap] executeSnapForZone: no frame or zone is None");
-        return;
-    }
-
-    [self ensureWorkareaCache:frame];
-    //NSLog(@"[Snap] executeSnapForZone: zone=%ld workarea=(%d,%d,%u,%u) valid=%d",
-    //      (long)zone, _cachedWorkareaX, _cachedWorkareaY,
-    //      _cachedWorkareaWidth, _cachedWorkareaHeight, self.workareaValid);
-
-    // Save current rect for restore
-    [frame setOldRect:[frame windowRect]];
-
-    XCBRect targetRect;
-    switch (zone) {
-        case SnapZoneTop:
-            // Full maximize
-            targetRect = XCBMakeRect(
-                XCBMakePoint(_cachedWorkareaX, _cachedWorkareaY),
-                XCBMakeSize(_cachedWorkareaWidth, _cachedWorkareaHeight));
-            [frame setIsMaximized:YES];
-            //NSLog(@"[Snap] Maximizing window to workarea");
-            break;
-
-        case SnapZoneLeft:
-            // Left half of screen
-            targetRect = XCBMakeRect(
-                XCBMakePoint(_cachedWorkareaX, _cachedWorkareaY),
-                XCBMakeSize(_cachedWorkareaWidth / 2, _cachedWorkareaHeight));
-            //NSLog(@"[Snap] Tiling window to left half");
-            break;
-
-        case SnapZoneRight:
-            // Right half of screen
-            targetRect = XCBMakeRect(
-                XCBMakePoint(_cachedWorkareaX + _cachedWorkareaWidth / 2, _cachedWorkareaY),
-                XCBMakeSize(_cachedWorkareaWidth / 2, _cachedWorkareaHeight));
-            //NSLog(@"[Snap] Tiling window to right half");
-            break;
-
-        case SnapZoneTopLeft:
-            // Top-left quarter
-            targetRect = XCBMakeRect(
-                XCBMakePoint(_cachedWorkareaX, _cachedWorkareaY),
-                XCBMakeSize(_cachedWorkareaWidth / 2, _cachedWorkareaHeight / 2));
-            //NSLog(@"[Snap] Tiling window to top-left quarter");
-            break;
-
-        case SnapZoneTopRight:
-            // Top-right quarter
-            targetRect = XCBMakeRect(
-                XCBMakePoint(_cachedWorkareaX + _cachedWorkareaWidth / 2, _cachedWorkareaY),
-                XCBMakeSize(_cachedWorkareaWidth / 2, _cachedWorkareaHeight / 2));
-            //NSLog(@"[Snap] Tiling window to top-right quarter");
-            break;
-
-        case SnapZoneBottomLeft:
-            // Bottom-left quarter
-            targetRect = XCBMakeRect(
-                XCBMakePoint(_cachedWorkareaX, _cachedWorkareaY + _cachedWorkareaHeight / 2),
-                XCBMakeSize(_cachedWorkareaWidth / 2, _cachedWorkareaHeight / 2));
-            //NSLog(@"[Snap] Tiling window to bottom-left quarter");
-            break;
-
-        case SnapZoneBottomRight:
-            // Bottom-right quarter
-            targetRect = XCBMakeRect(
-                XCBMakePoint(_cachedWorkareaX + _cachedWorkareaWidth / 2, _cachedWorkareaY + _cachedWorkareaHeight / 2),
-                XCBMakeSize(_cachedWorkareaWidth / 2, _cachedWorkareaHeight / 2));
-            //NSLog(@"[Snap] Tiling window to bottom-right quarter");
-            break;
-
-        default:
-            return;
-    }
-
-    // Animate if compositor is active
-    {
-        Class compositorClass = NSClassFromString(@"URSCompositingManager");
-        id<URSCompositingManaging> compositor = nil;
-        if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
-            compositor = [compositorClass performSelector:@selector(sharedManager)];
-        }
-        if (compositor && [compositor compositingActive] &&
-            [compositor respondsToSelector:@selector(animateWindowTransition:fromRect:toRect:duration:fade:)]) {
-            XCBRect startRect = [frame windowRect];
-            [frame programmaticResizeToRect:targetRect];
-            XCBRect endRect = [frame windowRect];
-            [compositor animateWindowTransition:[frame window]
-                                       fromRect:startRect
-                                         toRect:endRect
-                                       duration:0.2
-                                           fade:NO];
-        } else {
-            [frame programmaticResizeToRect:targetRect];
-        }
-    }
-
-    [frame updateAllResizeZonePositions];
-
-    // Redraw title bar
-    XCBTitleBar *titleBar = (XCBTitleBar *)[frame childWindowForKey:TitleBar];
-    if (titleBar) {
-        [titleBar drawTitleBarComponents];
-    }
-
-    [self flush];
-}
-
-- (void)showSnapPreviewForZone:(SnapZone)zone frame:(XCBFrame *)frame {
-    //NSLog(@"[Snap] showSnapPreviewForZone called with zone=%ld", (long)zone);
-
-    if (zone == SnapZoneNone) {
-        [self hideSnapPreview];
-        return;
-    }
-
-    // Use URSSnapPreviewOverlay if available (loaded from WindowManager app)
-    Class overlayClass = NSClassFromString(@"URSSnapPreviewOverlay");
-    if (overlayClass && [overlayClass respondsToSelector:@selector(sharedOverlay)]) {
-        id overlay = [overlayClass performSelector:@selector(sharedOverlay)];
-
-        // Calculate preview rect based on snap zone
-        [self ensureWorkareaCache:frame];
-
-        // Get screen height for X11 to GNUstep coordinate conversion
-        // X11: Y=0 at top, GNUstep/NSWindow: Y=0 at bottom
-        XCBScreen *xcbScreen = [screens firstObject];
-        CGFloat screenHeight = [xcbScreen height];
-
-        CGFloat previewX = 0, previewWidth = 0, previewHeight = 0;
-        NSRect previewRect = NSZeroRect;
-
-        switch (zone) {
-            case SnapZoneTop:
-                previewWidth = _cachedWorkareaWidth;
-                previewHeight = _cachedWorkareaHeight;
-                previewX = _cachedWorkareaX;
-                previewRect = NSMakeRect(previewX,
-                                         screenHeight - _cachedWorkareaY - previewHeight,
-                                         previewWidth, previewHeight);
-                break;
-            case SnapZoneLeft:
-                previewWidth = _cachedWorkareaWidth / 2;
-                previewHeight = _cachedWorkareaHeight;
-                previewX = _cachedWorkareaX;
-                previewRect = NSMakeRect(previewX,
-                                         screenHeight - _cachedWorkareaY - previewHeight,
-                                         previewWidth, previewHeight);
-                break;
-            case SnapZoneRight:
-                previewWidth = _cachedWorkareaWidth / 2;
-                previewHeight = _cachedWorkareaHeight;
-                previewX = _cachedWorkareaX + _cachedWorkareaWidth / 2;
-                previewRect = NSMakeRect(previewX,
-                                         screenHeight - _cachedWorkareaY - previewHeight,
-                                         previewWidth, previewHeight);
-                break;
-            case SnapZoneTopLeft:
-                previewWidth = _cachedWorkareaWidth / 2;
-                previewHeight = _cachedWorkareaHeight / 2;
-                previewX = _cachedWorkareaX;
-                // Top quarter: X11 Y is at workarea top
-                previewRect = NSMakeRect(previewX,
-                                         screenHeight - _cachedWorkareaY - previewHeight,
-                                         previewWidth, previewHeight);
-                break;
-            case SnapZoneTopRight:
-                previewWidth = _cachedWorkareaWidth / 2;
-                previewHeight = _cachedWorkareaHeight / 2;
-                previewX = _cachedWorkareaX + _cachedWorkareaWidth / 2;
-                // Top quarter: X11 Y is at workarea top
-                previewRect = NSMakeRect(previewX,
-                                         screenHeight - _cachedWorkareaY - previewHeight,
-                                         previewWidth, previewHeight);
-                break;
-            case SnapZoneBottomLeft:
-                previewWidth = _cachedWorkareaWidth / 2;
-                previewHeight = _cachedWorkareaHeight / 2;
-                previewX = _cachedWorkareaX;
-                // Bottom quarter: X11 Y is at workarea midpoint
-                previewRect = NSMakeRect(previewX,
-                                         screenHeight - (_cachedWorkareaY + _cachedWorkareaHeight / 2) - previewHeight,
-                                         previewWidth, previewHeight);
-                break;
-            case SnapZoneBottomRight:
-                previewWidth = _cachedWorkareaWidth / 2;
-                previewHeight = _cachedWorkareaHeight / 2;
-                previewX = _cachedWorkareaX + _cachedWorkareaWidth / 2;
-                // Bottom quarter: X11 Y is at workarea midpoint
-                previewRect = NSMakeRect(previewX,
-                                         screenHeight - (_cachedWorkareaY + _cachedWorkareaHeight / 2) - previewHeight,
-                                         previewWidth, previewHeight);
-                break;
-            default:
-                NSLog(@"[Snap] WARNING: Unknown zone %ld in showSnapPreviewForZone", (long)zone);
-                return;
-        }
-
-        //NSLog(@"[Snap] Showing preview for zone=%ld rect=(%.0f,%.0f,%.0f,%.0f)",
-        //      (long)zone, previewRect.origin.x, previewRect.origin.y,
-        //      previewRect.size.width, previewRect.size.height);
-
-        if ([overlay respondsToSelector:@selector(showPreviewForRect:)]) {
-            // Defer out of the XCB event processing loop so that orderFront:nil
-            // inside showPreviewForRect: does not interfere with the active pointer
-            // grab, which would prevent further motion events from reaching the drag.
-            [overlay performSelector:@selector(showPreviewForRect:)
-                          withObject:[NSValue valueWithRect:previewRect]
-                          afterDelay:0.0];
-        }
-    }
-}
-
-- (void)hideSnapPreview {
-    Class overlayClass = NSClassFromString(@"URSSnapPreviewOverlay");
-    if (overlayClass && [overlayClass respondsToSelector:@selector(sharedOverlay)]) {
-        id overlay = [overlayClass performSelector:@selector(sharedOverlay)];
-        if ([overlay respondsToSelector:@selector(hide)]) {
-            [overlay performSelector:@selector(hide)];
-        }
-    }
-}
-
 - (XCBFrame *)getActiveFrame {
     // Read _NET_ACTIVE_WINDOW from root window to find the active window
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
@@ -4177,77 +3795,6 @@ static XCBConnection *sharedInstance;
     }
 
     return frame;
-}
-
-- (void)tileActiveWindowLeft {
-    XCBFrame *frame = [self getActiveFrame];
-
-    if (!frame) {
-        //NSLog(@"[Tile] No active window to tile");
-        return;
-    }
-
-    [self executeSnapForZone:SnapZoneLeft frame:frame];
-}
-
-- (void)tileActiveWindowRight {
-    XCBFrame *frame = [self getActiveFrame];
-
-    if (!frame) {
-        //NSLog(@"[Tile] No active window to tile");
-        return;
-    }
-
-    [self executeSnapForZone:SnapZoneRight frame:frame];
-}
-
-- (void)tileActiveWindowToZone:(SnapZone)zone {
-    XCBFrame *frame = [self getActiveFrame];
-
-    if (!frame) {
-        //NSLog(@"[Tile] No active window to tile");
-        return;
-    }
-
-    [self executeSnapForZone:zone frame:frame];
-}
-
-- (void)centerActiveWindow {
-    XCBFrame *frame = [self getActiveFrame];
-
-    if (!frame) {
-        //NSLog(@"[Center] No active window to center");
-        return;
-    }
-
-    [self ensureWorkareaCache:frame];
-
-    // Get current window size
-    XCBRect currentRect = [frame windowRect];
-    uint32_t windowWidth = currentRect.size.width;
-    uint32_t windowHeight = currentRect.size.height;
-
-    // Calculate centered position
-    int32_t centerX = _cachedWorkareaX + (_cachedWorkareaWidth - windowWidth) / 2;
-    int32_t centerY = _cachedWorkareaY + (_cachedWorkareaHeight - windowHeight) / 2;
-
-    // Ensure window stays within workarea
-    if (centerX < _cachedWorkareaX) centerX = _cachedWorkareaX;
-    if (centerY < _cachedWorkareaY) centerY = _cachedWorkareaY;
-
-    XCBRect targetRect = XCBMakeRect(
-        XCBMakePoint(centerX, centerY),
-        XCBMakeSize(windowWidth, windowHeight));
-
-    //NSLog(@"[Center] Centering window to (%d, %d)", centerX, centerY);
-
-    // Save current rect for restore
-    [frame setOldRect:currentRect];
-
-    [frame programmaticResizeToRect:targetRect];
-    [frame updateAllResizeZonePositions];
-
-    [self flush];
 }
 
 - (void)centerFrame:(XCBFrame *)frame {

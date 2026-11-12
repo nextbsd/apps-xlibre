@@ -1,12 +1,12 @@
 //
 //  URSHybridEventHandler.h
-//  uroswm - Event Coordinator
+//  XLibre.app - the window manager
 //
 //  Created by Alessandro Sangiuliano on 22/06/20.
 //  Copyright (c) 2020 Alessandro Sangiuliano. All rights reserved.
 //
-//  Coordinator: owns the XCB event loop and dispatches to single-responsibility
-//  managers (focus, keyboard, workarea, titlebar, snapping menu).
+//  Owns the XCB event loop on the NSRunLoop and dispatches to the focus,
+//  workarea and title bar managers.
 //
 
 #import <AppKit/AppKit.h>
@@ -15,16 +15,11 @@
 #import "XCBWindow.h"
 #import "XCBTitleBar.h"
 #import "URSThemeIntegration.h"
-#import "URSWindowSwitcher.h"
-#import "URSWindowSwitcherOverlay.h"
-#import "URSCompositingManager.h"
 #import "URSFocusManager.h"
-#import "URSKeyboardManager.h"
 #import "URSWorkareaManager.h"
 #import "URSTitlebarController.h"
-#import "URSSnappingMenuController.h"
 
-@interface URSHybridEventHandler : NSObject <NSApplicationDelegate, RunLoopEvents>
+@interface URSHybridEventHandler : NSObject <RunLoopEvents>
 
 // XCB Integration
 @property (strong, nonatomic) XCBConnection *connection;
@@ -35,22 +30,22 @@
 
 // Event loop bookkeeping
 @property (assign, nonatomic) BOOL xcbEventsIntegrated;
-@property (assign, nonatomic) BOOL nsRunLoopActive;
 @property (assign, nonatomic) NSUInteger eventCount;
-
-// Window Switcher (Alt-Tab)
-@property (strong, nonatomic) URSWindowSwitcher *windowSwitcher;
-
-// Compositing Manager
-@property (strong, nonatomic) URSCompositingManager *compositingManager;
-@property (assign, nonatomic) BOOL compositingRequested;
 
 // --- Single-responsibility managers ---
 @property (strong, nonatomic) URSFocusManager *focusManager;
-@property (strong, nonatomic) URSKeyboardManager *keyboardManager;
 @property (strong, nonatomic) URSWorkareaManager *workareaManager;
 @property (strong, nonatomic) URSTitlebarController *titlebarController;
-@property (strong, nonatomic) URSSnappingMenuController *snappingMenuController;
+
+// Connects to the X server named by DISPLAY; nil if it can't.
+- (id)init;
+
+// Become the window manager, adopt existing windows and put the XCB
+// connection on the NSRunLoop. NO if another window manager won't let go.
+- (BOOL)start;
+
+// Top-level client windows the window manager has framed.
+- (NSUInteger)managedWindowCount;
 
 // Window manager lifecycle
 - (BOOL)registerAsWindowManager;
@@ -63,10 +58,6 @@
 // GSTheme integration
 - (void)refreshAllManagedWindows;
 
-// Spatial path popup (modifier+click on titlebar with _GW_SPATIAL_PATH)
-- (BOOL)handleSpatialPathTitleClick:(xcb_button_press_event_t *)pressEvent;
-- (void)spatialPathMenuItemSelected:(NSMenuItem *)sender;
-
 // Cleanup
 - (void)cleanupBeforeExit;
 
@@ -74,4 +65,3 @@
 - (void)handleSelectionClear:(xcb_selection_clear_event_t *)event;
 
 @end
-
