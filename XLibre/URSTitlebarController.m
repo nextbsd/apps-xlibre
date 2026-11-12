@@ -9,7 +9,6 @@
 #import "URSTitlebarController.h"
 #import "URSProfiler.h"
 #import "URSThemeIntegration.h"
-#import "URSCompositingManager.h"
 #import "URSFocusManager.h"
 #import "URSDecorationMetrics.h"
 
@@ -250,27 +249,13 @@
 
 - (BOOL)titlebarIsActiveForFrame:(XCBFrame *)frame clientWindow:(XCBWindow *)clientWindow
 {
-    if (!self.focusManager || self.focusManager.lastFocusedWindowId == XCB_NONE) {
-        return NO;
-    }
-    return (clientWindow != nil &&
-            [clientWindow window] == self.focusManager.lastFocusedWindowId);
+    return self.focusManager != nil && [self.focusManager isFrameFocused:frame];
 }
 
 - (void)animateTransition:(XCBFrame *)frame
                  fromRect:(XCBRect)startRect
                    toRect:(XCBRect)endRect
 {
-    if (self.compositingManager &&
-        [self.compositingManager compositingActive] &&
-        [self.compositingManager respondsToSelector:
-            @selector(animateWindowTransition:fromRect:toRect:duration:fade:)]) {
-        [self.compositingManager animateWindowTransition:[frame window]
-                                               fromRect:startRect
-                                                 toRect:endRect
-                                               duration:0.22
-                                                   fade:NO];
-    }
 }
 
 #pragma mark - Pressed Button Tracking
@@ -338,13 +323,7 @@
     // Determine active state from the focus manager, not from stacking order.
     // Stacking order (isAbove) can differ from keyboard focus; the titlebar
     // MUST always reflect which window actually has keyboard input.
-    BOOL isActive = NO;
-    if (self.focusManager) {
-        xcb_window_t focusedClientId = self.focusManager.lastFocusedWindowId;
-        if (focusedClientId != XCB_NONE && clientWindow) {
-            isActive = ([clientWindow window] == focusedClientId);
-        }
-    }
+    BOOL isActive = self.focusManager != nil && [self.focusManager isFrameFocused:frame];
     // Fallback to isAbove if no focus manager is available (should not happen)
     if (!self.focusManager) {
         isActive = [titlebar isAbove];
@@ -359,20 +338,6 @@
     [titlebar drawArea:rect];
     [self.connection flush];
 
-    // Invalidate ALL frames in the compositor so every window's decorations
-    // are re-snapshotted — any titlebar change (hover, active state, etc.)
-    // affects the visual relationship between all windows.
-    if (self.compositingManager && [self.compositingManager compositingActive]) {
-        NSDictionary *allWindows = [self.connection windowsMap];
-        for (NSString *wid in allWindows) {
-            XCBWindow *win = [allWindows objectForKey:wid];
-            if (win && [win isKindOfClass:[XCBFrame class]]) {
-                [self.compositingManager invalidateWindowPixmap:[win window]];
-            }
-        }
-        [self.compositingManager markStackingOrderDirty];
-        [self.compositingManager performRepairNow];
-    }
 }
 
 - (void)redrawTitlebarById:(xcb_window_t)titlebarId
@@ -409,20 +374,6 @@
         [titlebar drawArea:[titlebar windowRect]];
         [self.connection flush];
 
-        // Invalidate ALL frames in the compositor so every window's
-        // decorations are re-snapshotted — active state changes affect
-        // every titlebar's appearance.
-        if (self.compositingManager && [self.compositingManager compositingActive]) {
-            NSDictionary *allWindows = [self.connection windowsMap];
-            for (NSString *wid in allWindows) {
-                XCBWindow *win = [allWindows objectForKey:wid];
-                if (win && [win isKindOfClass:[XCBFrame class]]) {
-                    [self.compositingManager invalidateWindowPixmap:[win window]];
-                }
-            }
-            [self.compositingManager markStackingOrderDirty];
-            [self.compositingManager performRepairNow];
-        }
 
     } @catch (NSException *exception) {
         NSLog(@"Exception in rerenderTitlebarForFrame: %@", exception.reason);
@@ -479,10 +430,6 @@
 
             [titlebar drawArea:titlebarRect];
 
-            if (self.compositingManager &&
-                [self.compositingManager compositingActive]) {
-                [self.compositingManager updateWindow:[frame window]];
-            }
         } else {
             [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
             [titlebar drawArea:titlebarRect];
@@ -535,12 +482,6 @@
             [titlebar drawArea:[titlebar windowRect]];
             [self.connection flush];
 
-            if (self.compositingManager &&
-                [self.compositingManager compositingActive]) {
-                [self.compositingManager updateWindow:[frame window]];
-                [self.compositingManager damageScreen];
-                [self.compositingManager performRepairNow];
-            }
         }
     } @catch (NSException *exception) {
         NSLog(@"Exception in handleResizeComplete: %@", exception.reason);

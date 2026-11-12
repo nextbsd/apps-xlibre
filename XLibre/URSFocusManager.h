@@ -44,4 +44,8 @@
 - (xcb_window_t)clientWindowIdForWindowId:(xcb_window_t)windowId;
 - (XCBWindow *)windowForClientWindowId:(xcb_window_t)clientId;
 
+// Does this frame hold the focused window? The focus is tracked by client
+// window id, or by the frame's own id after some frame clicks.
+- (BOOL)isFrameFocused:(XCBFrame *)frame;
+
 @end

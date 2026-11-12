@@ -51,6 +51,7 @@
 #include <X11/X.h>
 
 #include "dix/dix_priv.h"
+#include "dix/property_priv.h"
 #include "scrnintstr.h"
 #include "windowstr.h"
 #include "rootlessCommon.h"
@@ -364,6 +365,15 @@ nbRestackFrame(RootlessFrameID wid, RootlessFrameID nextWid)
     nbFrame *frame = wid, *next = nextWid;
     int ok;
 
+    if (nbScreenInfo.hidden) {
+        /* Shown again, in X's stacking order, when XLibre.app unhides. */
+        if (!frame->ordered_in) {
+            frame->ordered_in = TRUE;
+            nbFrameDamageAll(frame);
+            nbFrameCommit(frame);
+        }
+        return;
+    }
     if (next != NULL && next->ordered_in && next->level == frame->level)
         ok = ws_window_order(nbConnection(), frame->wid, WS_ORDER_BELOW,
                              next->wid);
@@ -523,6 +533,79 @@ nbHideWindow(RootlessFrameID wid)
     nbUnmapFrame(wid);
 }
 
+/*
+ * Hide and show: XLibre.app was hidden (its Hide menu item, Command-H) or
+ * shown again. Hidden, every frame is ordered out on WindowServer while
+ * its X window stays mapped, so X clients see no change; frame->ordered_in
+ * keeps saying which frames X has on screen. Shown, those go back in X's
+ * stacking order, bottom first, each on top of its level.
+ */
+static void
+nbFrameSetHidden(Bool hide)
+{
+    ScreenPtr pScreen = screenInfo.screens[0];
+    WindowPtr pWin;
+    RootlessWindowRec *winRec;
+    nbFrame *frame;
+
+    if (hide == nbScreenInfo.hidden)
+        return;
+    nbScreenInfo.hidden = hide;
+    if (hide) {
+        xorg_list_for_each_entry(frame, &nbScreenInfo.frames, link)
+            if (frame->ordered_in &&
+                ws_window_order(nbConnection(), frame->wid, WS_ORDER_OUT,
+                                0) < 0) {
+                nbWindowServerLost("hide");
+                return;
+            }
+        nbScreenInfo.pointer_frame = NULL;
+        return;
+    }
+    if (pScreen == NULL || pScreen->root == NULL)
+        return;
+    for (pWin = pScreen->root->lastChild; pWin != NULL; pWin = pWin->prevSib) {
+        winRec = WINREC(pWin);
+        if (winRec == NULL || (frame = winRec->wid) == NULL ||
+            !frame->ordered_in)
+            continue;
+        if (ws_window_order(nbConnection(), frame->wid, WS_ORDER_ABOVE,
+                            0) < 0) {
+            nbWindowServerLost("show");
+            return;
+        }
+        nbFrameDamageAll(frame);
+        nbFrameCommit(frame);
+    }
+}
+
+/*
+ * Watch ChangeProperty and DeleteProperty of NB_HIDDEN_ATOM on the root
+ * window, which is how XLibre.app's window manager says hide and show.
+ * The request itself goes ahead, so the property shows the state.
+ */
+static void
+nbPropertyFilter(CallbackListPtr *pcbl, void *unused, void *calldata)
+{
+    PropertyFilterParam *p = calldata;
+    ScreenPtr pScreen = screenInfo.screens[0];
+    Atom hidden;
+
+    if (p->skip || pScreen == NULL || pScreen->root == NULL ||
+        p->window != pScreen->root->drawable.id || p->atoms != NULL)
+        return;
+    hidden = MakeAtom(NB_HIDDEN_ATOM, strlen(NB_HIDDEN_ATOM), FALSE);
+    if (hidden == None || p->property != hidden)
+        return;
+    if (p->access_mode == DixRemoveAccess) {
+        nbFrameSetHidden(FALSE);
+    } else if (p->access_mode == DixWriteAccess && p->format == 32 &&
+               p->len >= 1 && p->value != NULL &&
+               p->mode == PropModeReplace) {
+        nbFrameSetHidden(((const CARD32 *) p->value)[0] != 0);
+    }
+}
+
 static RootlessFrameProcsRec nbRootlessProcs = {
     .CreateFrame = nbCreateFrame,
     .DestroyFrame = nbDestroyFrame,
@@ -544,5 +627,8 @@ nbFrameInit(ScreenPtr pScreen)
 {
     rootlessGlobalOffsetX = 0;
     rootlessGlobalOffsetY = 0;
+    nbScreenInfo.hidden = FALSE;
+    if (!AddCallback(&PropertyFilterCallback, nbPropertyFilter, NULL))
+        return FALSE;
     return RootlessInit(pScreen, &nbRootlessProcs);
 }
