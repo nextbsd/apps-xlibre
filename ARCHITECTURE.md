@@ -92,6 +92,34 @@ XLibre/
   minus the Dock's strip) on the root window as `_XNEXTBSD_USABLE_AREA`,
   and the window manager keeps `_NET_WORKAREA`, and so new windows, inside
   it.
+- **Minimizing:** the title bar's minimize button, or an X client's own
+  iconify (`XIconifyWindow`, `WM_CHANGE_STATE` IconicState), minimizes the
+  window through WindowServer, as GNUstep windows are: the window manager
+  sets `WM_STATE` IconicState and `_NET_WM_STATE_HIDDEN` on the client and
+  `_XNEXTBSD_MINIMIZED` on its frame (where: into the Dock when the
+  user's `NBMinimizeStyle` is `dock`, the default, else WindowServer's
+  bottom row), and Xnextbsd minimizes the frame with
+  `ws_window_minimize_where()`. The X windows stay mapped, so the Dock's
+  preview of the window is live; the Dock shows it with XLibre's icon,
+  since Xnextbsd's connection is part of XLibre's app. Clicking the
+  preview (or `WS_EVENT_WINDOW_RESTORE` from the overview) makes Xnextbsd
+  show the window again, delete `_XNEXTBSD_MINIMIZED` and send the window
+  manager a `_XNEXTBSD_RESTORE` ClientMessage, which puts `WM_STATE` back to
+  NormalState, raises and focuses the window. `_NET_ACTIVE_WINDOW`, a
+  `WM_CHANGE_STATE` NormalState or mapping the client restores it too, and
+  makes XLibre active.
+- **Window tiling:** when WindowServer tiles (`WindowMode` `tiling`), it
+  gives X windows new frames, sizes included. Xnextbsd resizes the frame
+  to them within the client's `WM_NORMAL_HINTS` (minimum, maximum, resize
+  increments: an xterm fills its tile but for less than a character
+  cell), counting the window manager's `_NET_FRAME_EXTENTS` (the title
+  bar), and the window manager lays the frame out again around the
+  client, which gets its ConfigureNotify and redraws. Xnextbsd tells
+  WindowServer each window's size limits and flags: `WS_WINDOW_PANEL` for
+  transient windows, dialogs, menus and override-redirect windows, and
+  `WS_WINDOW_FIXED_SIZE` for windows that can't be resized, so those float
+  above the tiles. WindowServer also gets each window's title (the
+  client's name), which the Dock shows.
 - **Screen changes:** when WindowServer's screen changes size, Xnextbsd
   resizes the root window and tells X clients through RandR (one output,
   the current mode; X clients can't set another). WindowServer moves the
