@@ -29,20 +29,26 @@
  */
 
 /*
- * WindowServer draws the cursor; X only says which image. Each time X
- * changes the cursor, its image is converted to premultiplied ARGB8888 in
- * a new WindowServer buffer and set as our app's custom cursor, which
- * WindowServer shows while the pointer is over one of our windows. There
- * is no software cursor in the X server.
+ * WindowServer draws the cursor; X only says which image. Each X cursor is
+ * converted once to premultiplied ARGB8888 in a WindowServer buffer, kept
+ * until X frees the cursor. There is no software cursor in the X server.
  *
- * TODO: a cursor per window (a later WindowServer item), so the cursor
- * is right the moment the pointer enters a window, before X has seen the
- * motion.
+ * With a WindowServer that has a cursor per window
+ * (WS_SERVER_WINDOW_CURSOR), the cursor X shows goes to the frame the
+ * pointer is in, so WindowServer shows it the moment the pointer enters
+ * that frame again, before X has seen the motion; over no frame of ours
+ * (during a grab) it is our connection's cursor. With an older one, it
+ * is always the connection's cursor, sent again whenever it changes.
+ *
+ * Warps (XWarpPointer) move WindowServer's pointer too, which it allows
+ * while we are the active app and the pointer is over one of our frames
+ * or grabbed by us (WS_SERVER_POINTER_WARP).
  */
 
 #include <dix-config.h>
 
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "dix/cursor_priv.h"
@@ -50,14 +56,23 @@
 
 #include "scrnintstr.h"
 #include "cursorstr.h"
+#include "inputstr.h"
 #include "fb.h"
 #include "mipointer.h"
 #include "servermd.h"
 
 #include "nextbsd.h"
 
-static ws_buffer_t *nbCursorBuffer;     /* the cursor WindowServer shows */
-static CursorPtr nbCursorShown;         /* and the X cursor it came from */
+/* An X cursor's image in a WindowServer buffer. */
+typedef struct nbCursorBuf {
+    struct xorg_list link;
+    CursorPtr cursor;
+    ws_buffer_t *buffer;
+} nbCursorBuf;
+
+static struct xorg_list nbCursorImages;
+static Bool nbCursorImagesInit;
+static CursorPtr nbCursorShown;         /* our connection's cursor */
 static Bool nbCursorHidden;
 
 /* Premultiply a non-premultiplied colour by alpha 0xff or 0x00. */
@@ -109,10 +124,60 @@ nbCursorImage(CursorPtr pCursor, ws_buffer_t *buffer)
     }
 }
 
+/* The buffer holding pCursor's image, made the first time it is shown. */
+static ws_buffer_t *
+nbCursorBuffer(CursorPtr pCursor)
+{
+    nbCursorBuf *ci;
+
+    xorg_list_for_each_entry(ci, &nbCursorImages, link)
+        if (ci->cursor == pCursor)
+            return ci->buffer;
+    ci = calloc(1, sizeof(*ci));
+    if (ci == NULL)
+        return NULL;
+    ci->buffer = ws_buffer_create(nbConnection(), pCursor->bits->width,
+                                  pCursor->bits->height, 1);
+    if (ci->buffer == NULL) {
+        ErrorF("Xnextbsd: can't make a cursor buffer: %s\n",
+               strerror(errno));
+        free(ci);
+        return NULL;
+    }
+    nbCursorImage(pCursor, ci->buffer);
+    ci->cursor = pCursor;
+    xorg_list_add(&ci->link, &nbCursorImages);
+    return ci->buffer;
+}
+
+/* Drop a cursor's buffer (WindowServer keeps its own references). */
 static void
-nbCursorShow(CursorPtr pCursor)
+nbCursorForget(nbCursorBuf *ci)
+{
+    xorg_list_del(&ci->link);
+    if (nbConnection() != NULL)
+        ws_buffer_destroy(nbConnection(), ci->buffer);
+    free(ci);
+}
+
+/* The frame showing the window the sprite is in, or NULL (the root). */
+static nbFrame *
+nbCursorFrame(DeviceIntPtr pDev)
+{
+    SpritePtr sprite;
+
+    if (pDev == NULL || pDev->spriteInfo == NULL ||
+        (sprite = pDev->spriteInfo->sprite) == NULL)
+        return NULL;
+    return nbFrameOfWindow(sprite->win);
+}
+
+static void
+nbCursorShow(DeviceIntPtr pDev, CursorPtr pCursor)
 {
     ws_buffer_t *buffer;
+    nbFrame *frame = NULL;
+    int r;
 
     if (nbConnection() == NULL)
         return;
@@ -128,29 +193,31 @@ nbCursorShow(CursorPtr pCursor)
         ws_set_cursor_visible(nbConnection(), 1);
         nbCursorHidden = FALSE;
     }
-    if (pCursor == nbCursorShown)
+    if (nbScreenInfo.server_flags & WS_SERVER_WINDOW_CURSOR)
+        frame = nbCursorFrame(pDev);
+    if (frame != NULL ? frame->cursor == pCursor : pCursor == nbCursorShown)
         return;
 
-    buffer = ws_buffer_create(nbConnection(), pCursor->bits->width,
-                              pCursor->bits->height, 1);
-    if (buffer == NULL) {
-        ErrorF("Xnextbsd: can't make a cursor buffer: %s\n",
-               strerror(errno));
+    buffer = nbCursorBuffer(pCursor);
+    if (buffer == NULL)
         return;
-    }
-    nbCursorImage(pCursor, buffer);
-    if (ws_set_cursor(nbConnection(), WS_CURSOR_CUSTOM, buffer,
-                      pCursor->bits->xhot, pCursor->bits->yhot) < 0) {
-        ws_buffer_destroy(nbConnection(), buffer);
+    if (frame != NULL)
+        r = ws_window_set_cursor(nbConnection(), frame->wid,
+                                 WS_CURSOR_CUSTOM, buffer,
+                                 pCursor->bits->xhot, pCursor->bits->yhot);
+    else
+        r = ws_set_cursor(nbConnection(), WS_CURSOR_CUSTOM, buffer,
+                          pCursor->bits->xhot, pCursor->bits->yhot);
+    if (r < 0) {
         nbWindowServerLost("cursor");
         return;
     }
-    /* WindowServer keeps its own reference to the buffer it shows. */
-    if (nbCursorBuffer != NULL)
-        ws_buffer_destroy(nbConnection(), nbCursorBuffer);
-    nbCursorBuffer = buffer;
-    nbCursorShown = pCursor;
+    if (frame != NULL)
+        frame->cursor = pCursor;
+    else
+        nbCursorShown = pCursor;
 }
+
 
 /* ---- sprite functions ---- */
 
@@ -163,9 +230,18 @@ nbRealizeCursor(DeviceIntPtr pDev, ScreenPtr pScreen, CursorPtr pCursor)
 static Bool
 nbUnrealizeCursor(DeviceIntPtr pDev, ScreenPtr pScreen, CursorPtr pCursor)
 {
+    nbCursorBuf *ci, *tmp;
+    nbFrame *frame;
+
     /* The address may be reused by the next cursor. */
     if (pCursor == nbCursorShown)
         nbCursorShown = NULL;
+    xorg_list_for_each_entry(frame, &nbScreenInfo.frames, link)
+        if (frame->cursor == pCursor)
+            frame->cursor = NULL;
+    xorg_list_for_each_entry_safe(ci, tmp, &nbCursorImages, link)
+        if (ci->cursor == pCursor)
+            nbCursorForget(ci);
     return TRUE;
 }
 
@@ -173,7 +249,7 @@ static void
 nbSetCursor(DeviceIntPtr pDev, ScreenPtr pScreen, CursorPtr pCursor,
             int x, int y)
 {
-    nbCursorShow(pCursor);
+    nbCursorShow(pDev, pCursor);
 }
 
 static void
@@ -216,14 +292,22 @@ nbCrossScreen(ScreenPtr pScreen, Bool entering)
 }
 
 /*
- * TODO: pointer warps (XWarpPointer) need WindowServer's pointer warp,
- * limited to the active app (a later WindowServer item). Until then only
- * X's idea of the position moves.
+ * XWarpPointer: X's idea of the position moves, and WindowServer's pointer
+ * with it when it allows (see the top of the file): only asked when it
+ * would, so X's own warps at startup don't end in errors. Otherwise the
+ * next motion puts X back where the pointer really is.
  */
 static void
 nbWarpCursor(DeviceIntPtr pDev, ScreenPtr pScreen, int x, int y)
 {
     miPointerWarpCursor(pDev, pScreen, x, y);
+    if (nbConnection() == NULL ||
+        !(nbScreenInfo.server_flags & WS_SERVER_POINTER_WARP) ||
+        !nbScreenInfo.active ||
+        (nbScreenInfo.pointer_frame == NULL && !nbScreenInfo.ws_grab))
+        return;
+    if (ws_warp_pointer(nbConnection(), 0, x, y) < 0)
+        nbWindowServerLost("warp");
 }
 
 static miPointerScreenFuncRec nbPointerScreenFuncs = {
@@ -247,10 +331,15 @@ nbCursorQueryBestSize(int class, unsigned short *width,
 Bool
 nbCursorInit(ScreenPtr pScreen)
 {
-    /* A new server generation: the old cursor buffer isn't needed. */
-    if (nbCursorBuffer != NULL && nbConnection() != NULL)
-        ws_buffer_destroy(nbConnection(), nbCursorBuffer);
-    nbCursorBuffer = NULL;
+    nbCursorBuf *ci, *tmp;
+
+    /* A new server generation: the old cursors' buffers aren't needed. */
+    if (!nbCursorImagesInit) {
+        xorg_list_init(&nbCursorImages);
+        nbCursorImagesInit = TRUE;
+    }
+    xorg_list_for_each_entry_safe(ci, tmp, &nbCursorImages, link)
+        nbCursorForget(ci);
     nbCursorShown = NULL;
     nbCursorHidden = FALSE;
     pScreen->QueryBestSize = nbCursorQueryBestSize;

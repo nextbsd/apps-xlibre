@@ -41,7 +41,18 @@
  * modifiers from the key events alone.
  *
  * Pointer: absolute screen positions, the buttons, and wheel scrolling in
- * 120ths of a detent.
+ * 120ths of a detent. While we are the active app, WindowServer also
+ * tells us where the pointer goes outside our windows (pointer
+ * tracking, WS_SERVER_POINTER_WARP), with no window: X then sees it over
+ * the root window, and XQueryPointer (xeyes) follows it over the whole
+ * screen.
+ *
+ * Grabs: an X client's active grab (XGrabPointer, XIGrabDevice: a menu
+ * that stays open after the click) takes WindowServer's pointer grab
+ * (WS_SERVER_POINTER_GRAB), so every pointer event comes to us, over our
+ * windows or not, and a click outside activates no other app, until the
+ * client lets go. WindowServer ends it itself when another app is
+ * activated; the X grab then stays until the client releases it.
  */
 
 #include <dix-config.h>
@@ -87,6 +98,10 @@
 
 static DeviceIntPtr nbPointer;
 static DeviceIntPtr nbKeyboard;
+
+/* The core pointer's grab functions, wrapped (nbActivateGrab). */
+static void (*nbOrigActivateGrab) (DeviceIntPtr, GrabPtr, TimeStamp, Bool);
+static void (*nbOrigDeactivateGrab) (DeviceIntPtr);
 
 /* ---- devices ---- */
 
@@ -148,9 +163,14 @@ nbPointerProc(DeviceIntPtr device, int what)
 
     case DEVICE_ON:
         device->public.on = TRUE;
-        if (nbConnection() != NULL)
+        if (nbConnection() != NULL) {
             SetNotifyFd(ws_connection_fd(nbConnection()), nbInputDispatch,
                         X_NOTIFY_READ, NULL);
+            /* Motion outside our windows while we are active. */
+            if ((nbScreenInfo.server_flags & WS_SERVER_POINTER_WARP) &&
+                ws_pointer_track(nbConnection(), 1) < 0)
+                nbWindowServerLost("pointer tracking");
+        }
         return Success;
 
     case DEVICE_OFF:
@@ -237,9 +257,47 @@ nbKeyboardProc(DeviceIntPtr device, int what)
     return BadMatch;
 }
 
+/* ---- grabs ---- */
+
+/*
+ * An active grab on the core pointer. autoGrab is set for the implicit
+ * grab of a press and for passive grabs (XGrabButton), which end with
+ * the release, as WindowServer's own grab of a press does; an explicit
+ * grab (autoGrab FALSE) can outlive the press, so it takes WindowServer's
+ * pointer grab too. It is refused unless we are the active app, which
+ * changes nothing for X.
+ */
+static void
+nbActivateGrab(DeviceIntPtr dev, GrabPtr grab, TimeStamp time, Bool autoGrab)
+{
+    (*nbOrigActivateGrab) (dev, grab, time, autoGrab);
+    if (autoGrab || nbScreenInfo.ws_grab || nbConnection() == NULL ||
+        !(nbScreenInfo.server_flags & WS_SERVER_POINTER_GRAB) ||
+        !nbScreenInfo.active)
+        return;
+    if (ws_pointer_grab(nbConnection(), WS_GRAB_POINTER) == 0)
+        nbScreenInfo.ws_grab = TRUE;
+    else if (errno != EPERM && errno != EBUSY)
+        nbWindowServerLost("pointer grab");
+}
+
+/* The grab ended: so does WindowServer's, once no grab is left. */
+static void
+nbDeactivateGrab(DeviceIntPtr dev)
+{
+    (*nbOrigDeactivateGrab) (dev);
+    if (!nbScreenInfo.ws_grab || dev->deviceGrab.grab != NULL)
+        return;
+    nbScreenInfo.ws_grab = FALSE;
+    if (nbConnection() != NULL && ws_pointer_ungrab(nbConnection()) < 0)
+        nbWindowServerLost("pointer ungrab");
+}
+
 void
 InitInput(int argc, char **argv)
 {
+    DeviceIntPtr core = inputInfo.pointer;
+
 #if INPUTTHREAD
     /* WindowServer's events are read on the main thread. */
     InputThreadEnable = FALSE;
@@ -248,6 +306,16 @@ InitInput(int argc, char **argv)
                         nbPointerProc, nbKeyboardProc, FALSE) != Success)
         FatalError("Xnextbsd: can't create the input devices\n");
     mieqInit();
+
+    /* Grabs on the core pointer, where clients grab (a new one each
+       server generation). */
+    nbScreenInfo.ws_grab = FALSE;
+    if (core != NULL && core->deviceGrab.ActivateGrab != nbActivateGrab) {
+        nbOrigActivateGrab = core->deviceGrab.ActivateGrab;
+        nbOrigDeactivateGrab = core->deviceGrab.DeactivateGrab;
+        core->deviceGrab.ActivateGrab = nbActivateGrab;
+        core->deviceGrab.DeactivateGrab = nbDeactivateGrab;
+    }
 }
 
 void
@@ -592,7 +660,7 @@ nbClientWindow(WindowPtr top)
 }
 
 /* The frame showing a window, or NULL. */
-static nbFrame *
+nbFrame *
 nbFrameOfWindow(WindowPtr pWin)
 {
     RootlessFrameID wid;
@@ -661,15 +729,38 @@ nbFocusCheck(void)
 
 /* ---- WindowServer events ---- */
 
+/*
+ * A pointer event about one of our frames, or, with no window (our
+ * pointer grab, or tracking while we are active), about none: X then
+ * sees the pointer over the root window.
+ */
 static void
 nbPointerEvent(const ws_event_t *ev, Bool entered)
 {
     nbFrame *frame = nbFrameFromWID(ev->hdr.window);
 
-    if (frame == NULL)
+    if (frame == NULL && ev->hdr.window != 0)
         return;
     nbScreenInfo.pointer_frame = frame;
     nbPointerMotion(ev->u.pointer.screen_x, ev->u.pointer.screen_y);
+}
+
+/*
+ * We became the active app: the pointer may have moved anywhere while we
+ * weren't, so X learns where it is now.
+ */
+static void
+nbPointerResync(void)
+{
+    ws_pointer_info_t pi;
+
+    if (!(nbScreenInfo.server_flags & WS_SERVER_POINTER_WARP) ||
+        ws_query_pointer(nbConnection(), &pi) < 0)
+        return;
+    if (pi.window != 0 && nbFrameFromWID(pi.window) == NULL)
+        return;
+    nbScreenInfo.pointer_frame = nbFrameFromWID(pi.window);
+    nbPointerMotion(pi.x, pi.y);
 }
 
 static void
@@ -707,9 +798,20 @@ nbHandleEvent(ws_connection_t *conn, const ws_event_t *ev, void *context)
 
     case WS_EVENT_SCROLL:
         frame = nbFrameFromWID(ev->hdr.window);
-        if (frame != NULL)
+        if (frame != NULL || ev->hdr.window == 0)
             nbScreenInfo.pointer_frame = frame;
         nbPointerScroll(&ev->u.scroll);
+        break;
+
+    case WS_EVENT_POINTER_OUTSIDE:
+        /* A press outside our windows during our grab: the press itself
+           follows as WS_EVENT_MOUSE_DOWN with no window. */
+        break;
+
+    case WS_EVENT_POINTER_UNGRABBED:
+        /* Another app was activated; the X grab stays until its client
+           lets go, which it then does without us. */
+        nbScreenInfo.ws_grab = FALSE;
         break;
 
     case WS_EVENT_KEY_DOWN:
@@ -749,6 +851,7 @@ nbHandleEvent(ws_connection_t *conn, const ws_event_t *ev, void *context)
 
     case WS_EVENT_APP_ACTIVATED:
         nbScreenInfo.active = TRUE;
+        nbPointerResync();
         break;
 
     case WS_EVENT_APP_DEACTIVATED:
