@@ -729,6 +729,59 @@ static XCBConnection *sharedInstance;
     rootWindow = nil;
 }
 
+// Cascade: the placement point first, then one step down and right for
+// each window already at a step (CASCADE_STEP, about a title bar), as
+// NSWindow's cascadeTopLeftFromPoint: does. When a window would leave the
+// screen, a new column starts further right; when those run out too, it
+// goes back to the placement point.
+#define CASCADE_STEP 24
+
+- (void) cascadePositionForWidth:(uint16_t)width height:(uint16_t)height
+                               x:(int16_t *)x y:(int16_t *)y
+{
+    NSMutableSet *taken = [NSMutableSet set];
+    int screenW = 0, screenH = 0, column, step, cx, px, py;
+
+    if ([[self screens] count] > 0) {
+        xcb_screen_t *s = [[[self screens] objectAtIndex:0] screen];
+        screenW = s->width_in_pixels;
+        screenH = s->height_in_pixels;
+    }
+
+    // Top-left corners of the frames now on screen.
+    for (XCBWindow *w in [windowsMap allValues]) {
+        if (![w isKindOfClass:[XCBFrame class]] || ![w isMapped])
+            continue;
+        xcb_get_geometry_reply_t *g = xcb_get_geometry_reply(connection,
+            xcb_get_geometry(connection, [w window]), NULL);
+        if (g == NULL)
+            continue;
+        [taken addObject:[NSString stringWithFormat:@"%d,%d", g->x, g->y]];
+        free(g);
+    }
+
+    for (column = 0; ; column++) {
+        cx = self.placementX + column * CASCADE_STEP * 8;
+        if (column > 0 && (screenW <= 0 || cx + width > screenW))
+            break;
+        for (step = 0; ; step++) {
+            px = cx + step * CASCADE_STEP;
+            py = self.placementY + step * CASCADE_STEP;
+            if (step > 0 && (screenH <= 0 || py + height > screenH ||
+                             px + width > screenW))
+                break;
+            if (![taken containsObject:
+                      [NSString stringWithFormat:@"%d,%d", px, py]]) {
+                *x = (int16_t)px;
+                *y = (int16_t)py;
+                return;
+            }
+        }
+    }
+    *x = self.placementX;
+    *y = self.placementY;
+}
+
 - (void)handleMapRequest:(xcb_map_request_event_t *)anEvent
 {
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
@@ -1084,8 +1137,8 @@ static XCBConnection *sharedInstance;
                                 //NSLog(@"[MapRequest] Applying golden ratio placement (undecorated) for dialog window %u: %d, %d", [window window], xPos, yPos);
                             } else {
                                 // Other windows: the placement offset
-                                xPos = self.placementX;
-                                yPos = self.placementY;
+                                [self cascadePositionForWidth:reqW height:reqH
+                                                            x:&xPos y:&yPos];
                                 //NSLog(@"[MapRequest] Applying default placement (undecorated) for window %u: %d, %d", [window window], xPos, yPos);
                             }
                             XCBRect newRect = winRect;
@@ -1109,8 +1162,8 @@ static XCBConnection *sharedInstance;
                             //NSLog(@"[MapRequest] Applying golden ratio placement (undecorated) for dialog window %u: %d, %d", [window window], xPos, yPos);
                         } else {
                             // Other windows: the placement offset
-                            xPos = self.placementX;
-                            yPos = self.placementY;
+                            [self cascadePositionForWidth:reqW height:reqH
+                                                        x:&xPos y:&yPos];
                             //NSLog(@"[MapRequest] Applying default placement (undecorated) for window %u: %d, %d", [window window], xPos, yPos);
                         }
                         XCBRect newRect = winRect;
@@ -1616,8 +1669,8 @@ static XCBConnection *sharedInstance;
             //NSLog(@"[MapRequest] Applying golden ratio placement for dialog window %u: %d, %d", [window window], xPos, yPos);
         } else {
             // Other windows: the placement offset
-            xPos = self.placementX;
-            yPos = self.placementY;
+            [self cascadePositionForWidth:winWidth height:winHeight
+                                        x:&xPos y:&yPos];
             //NSLog(@"[MapRequest] Applying default placement for window %u: %d, %d", [window window], xPos, yPos);
         }
 
