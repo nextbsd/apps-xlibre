@@ -135,6 +135,16 @@ gmake                                   # XLibre.app
 gmake install XNEXTBSD=/path/Xnextbsd   # ~/Applications/XLibre.app, server inside
 ```
 
+NextBSD has no meson or ninja, so Xnextbsd is built by CI
+(`.github/workflows/xnextbsd.yml`) and published on every build of master to
+the rolling `xnextbsd-latest` release, as `Xnextbsd-amd64` and
+`Xnextbsd-arm64` (named by `uname -m`) with `.sha256` files and `SHA256SUMS`:
+
+```sh
+a=$(uname -m)
+fetch https://github.com/nextbsd/apps-xlibre/releases/download/xnextbsd-latest/Xnextbsd-$a
+```
+
 ## Key Design Decisions
 
 1. **No separate framework.** XCBKit was merged into the application to
