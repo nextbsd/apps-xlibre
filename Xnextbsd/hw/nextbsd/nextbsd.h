@@ -37,6 +37,7 @@
 #include "scrnintstr.h"
 #include "windowstr.h"
 #include "rootless.h"
+#include "cursor.h"
 
 /*
  * A WindowServer buffer of a frame. WindowServer reads it while it is
@@ -70,6 +71,11 @@ typedef struct nbFrame {
     uint32_t format;            /* WS_FORMAT_* of the buffer */
     Bool ordered_in;            /* in WindowServer's visible stack */
     RegionRec damage;           /* frame-local, not committed yet */
+    Bool shaped;                /* X Shape: the bounding shape below */
+    RegionRec shape;            /* frame-local; outside it the buffer is
+                                   transparent */
+    CursorPtr cursor;           /* the X cursor WindowServer shows over
+                                   this frame (WS_SERVER_WINDOW_CURSOR) */
     RootlessWindowPtr rwin;
 } nbFrame;
 
@@ -95,6 +101,8 @@ typedef struct nbScreen {
                                    looked, to tell WindowServer once */
     Bool hidden;                /* XLibre.app hid us: every frame is ordered
                                    out on WindowServer, X keeps them mapped */
+    Bool ws_grab;               /* we hold WindowServer's pointer grab, for
+                                   an X client's active grab */
     XYToWindowProcPtr XYToWindow;
 } nbScreen;
 
@@ -112,6 +120,7 @@ void nbFrameOrdered(nbFrame *frame, const ws_event_ordered_t *ordered);
 void nbFrameDone(nbFrame *frame);
 void nbFrameBufferReleased(nbFrame *frame, uint32_t buffer_id);
 void nbFrameMovedByWindowServer(nbFrame *frame, const ws_rect_t *r);
+nbFrame *nbFrameOfWindow(WindowPtr pWin);
 
 /*
  * The window manager's channel to the server, a property on the root

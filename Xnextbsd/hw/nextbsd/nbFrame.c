@@ -50,6 +50,16 @@
  * committed in one go when it does (nbFrameDone). A window drawing faster
  * than the screen refreshes costs one copy per frame shown, not one per
  * redisplay.
+ *
+ * With a WindowServer that has them, a resize carries the new frame in
+ * the commit of the first buffer at the new size
+ * (WS_SERVER_COMMIT_FRAME), so the window never shows its new size with
+ * old contents; frames are created without a round trip each
+ * (WS_SERVER_WINDOW_IDS); and shaped windows (X Shape) take pointer
+ * events only inside their bounding and input shapes
+ * (WS_SERVER_INPUT_REGION), while their buffers are premultiplied
+ * ARGB8888 with nothing outside the bounding shape, so they look shaped
+ * whatever their depth.
  */
 
 #include <dix-config.h>
@@ -63,6 +73,7 @@
 #include "dix/dix_priv.h"
 #include "dix/property_priv.h"
 #include "dix/resource_priv.h"
+#include "dix/window_priv.h"
 #include "scrnintstr.h"
 #include "windowstr.h"
 #include "rootlessCommon.h"
@@ -146,30 +157,55 @@ nbBuffersDestroy(nbFrame *frame)
     }
 }
 
-/* Copy a frame-local region of the backing into a buffer. */
+/*
+ * Copy a frame-local region of the backing into a buffer. In a shaped
+ * frame only what is inside the bounding shape is copied, opaque if the
+ * window has no alpha of its own, and the rest is made transparent.
+ */
 static void
 nbBufferUpdate(nbFrame *frame, nbBuffer *buf, RegionPtr region)
 {
     char *dst = ws_buffer_data(buf->ws);
     unsigned int dstride = ws_buffer_stride(buf->ws);
-    const BoxRec *box = RegionRects(region);
-    int i, n = RegionNumRects(region), y;
+    WindowPtr pWin = nbFrameWindow(frame);
+    Bool opaque = pWin == NULL || pWin->drawable.depth != 32;
+    BoxRec all = { 0, 0, frame->width, frame->height };
+    RegionRec in, out;
+    const BoxRec *box;
+    int i, n, x, y;
     size_t len;
 
-    for (i = 0; i < n; i++) {
-        BoxRec b = {
-            max(box[i].x1, 0), max(box[i].y1, 0),
-            min(box[i].x2, (int) frame->width),
-            min(box[i].y2, (int) frame->height),
-        };
-
-        if (b.x1 >= b.x2 || b.y1 >= b.y2)
-            continue;
-        len = (size_t) (b.x2 - b.x1) * 4;
-        for (y = b.y1; y < b.y2; y++)
-            memcpy(dst + (size_t) y * dstride + b.x1 * 4,
-                   frame->bits + (size_t) y * frame->stride + b.x1 * 4, len);
+    RegionInit(&in, &all, 1);
+    RegionIntersect(&in, &in, region);
+    RegionNull(&out);
+    if (frame->shaped) {
+        RegionSubtract(&out, &in, &frame->shape);
+        RegionIntersect(&in, &in, &frame->shape);
     }
+
+    box = RegionRects(&in);
+    n = RegionNumRects(&in);
+    for (i = 0; i < n; i++) {
+        len = (size_t) (box[i].x2 - box[i].x1) * 4;
+        for (y = box[i].y1; y < box[i].y2; y++) {
+            char *d = dst + (size_t) y * dstride + box[i].x1 * 4;
+
+            memcpy(d, frame->bits + (size_t) y * frame->stride +
+                   box[i].x1 * 4, len);
+            if (frame->shaped && opaque)
+                for (x = 0; x < box[i].x2 - box[i].x1; x++)
+                    ((uint32_t *) d)[x] |= 0xff000000u;
+        }
+    }
+    box = RegionRects(&out);
+    n = RegionNumRects(&out);
+    for (i = 0; i < n; i++) {
+        len = (size_t) (box[i].x2 - box[i].x1) * 4;
+        for (y = box[i].y1; y < box[i].y2; y++)
+            memset(dst + (size_t) y * dstride + box[i].x1 * 4, 0, len);
+    }
+    RegionUninit(&in);
+    RegionUninit(&out);
 }
 
 /*
@@ -205,19 +241,26 @@ nbFrameFreeBuffer(nbFrame *frame)
  * last commit's frame isn't done, or WindowServer holds both buffers,
  * the damage waits (commit_wanted) and goes with the next commit.
  * With nothing damaged there is nothing to do.
+ *
+ * With `rect`, the window also takes that frame: in the same commit
+ * (WS_SERVER_COMMIT_FRAME; the library falls back to setting it first),
+ * or at once if the commit has to wait.
  */
 static void
-nbFrameCommit(nbFrame *frame)
+nbFrameCommitWithFrame(nbFrame *frame, const ws_rect_t *rect)
 {
     ws_rect_t rects[NB_MAX_DAMAGE_RECTS];
     const BoxRec *box;
     nbBuffer *buf;
     int i, n;
 
-    if (frame->wid == 0 || !RegionNotEmpty(&frame->damage))
-        return;
-    if (frame->frame_pending || (buf = nbFrameFreeBuffer(frame)) == NULL) {
-        frame->commit_wanted = TRUE;
+    if (frame->wid == 0 || !RegionNotEmpty(&frame->damage) ||
+        frame->frame_pending || (buf = nbFrameFreeBuffer(frame)) == NULL) {
+        if (frame->wid != 0 && RegionNotEmpty(&frame->damage))
+            frame->commit_wanted = TRUE;
+        if (rect != NULL && frame->wid != 0 &&
+            ws_window_set_frame(nbConnection(), frame->wid, rect) < 0)
+            nbWindowServerLost("resize");
         return;
     }
     frame->commit_wanted = FALSE;
@@ -243,8 +286,11 @@ nbFrameCommit(nbFrame *frame)
 
     if (ws_window_attach(nbConnection(), frame->wid, buf->ws) < 0 ||
         ws_window_damage(nbConnection(), frame->wid, rects, n) < 0 ||
-        ws_window_commit(nbConnection(), frame->wid,
-                         WS_COMMIT_FRAME_DONE) < 0) {
+        (rect != NULL ?
+         ws_window_commit_frame(nbConnection(), frame->wid,
+                                WS_COMMIT_FRAME_DONE, rect) :
+         ws_window_commit(nbConnection(), frame->wid,
+                          WS_COMMIT_FRAME_DONE)) < 0) {
         nbWindowServerLost("commit");
         return;
     }
@@ -252,6 +298,12 @@ nbFrameCommit(nbFrame *frame)
        WS_EVENT_BUFFER_RELEASE. */
     buf->busy = TRUE;
     frame->frame_pending = TRUE;
+}
+
+static void
+nbFrameCommit(nbFrame *frame)
+{
+    nbFrameCommitWithFrame(frame, NULL);
 }
 
 /* WindowServer showed the last commit: commit what accumulated since. */
@@ -297,7 +349,7 @@ nbFrameDamageAll(nbFrame *frame)
  * are premultiplied ARGB8888, as RENDER draws them.
  */
 static void
-nbFrameStyle(WindowPtr pWin, int32_t *level, uint32_t *flags,
+nbFrameStyle(WindowPtr pWin, Bool shaped, int32_t *level, uint32_t *flags,
              uint32_t *format)
 {
     *flags = 0;
@@ -307,7 +359,8 @@ nbFrameStyle(WindowPtr pWin, int32_t *level, uint32_t *flags,
     } else {
         *level = WS_LEVEL_NORMAL;
     }
-    if (pWin->drawable.depth == 32) {
+    if (pWin->drawable.depth == 32 || shaped) {
+        /* A shaped window is transparent outside its bounding shape. */
         *format = WS_FORMAT_ARGB8888;
     } else if (nbScreenInfo.server_flags & WS_SERVER_XRGB) {
         *format = WS_FORMAT_XRGB8888;
@@ -319,6 +372,70 @@ nbFrameStyle(WindowPtr pWin, int32_t *level, uint32_t *flags,
         *format = WS_FORMAT_ARGB8888;
         *flags |= WS_WINDOW_OPAQUE;
     }
+}
+
+/*
+ * The frame's shape, from rootless's bounding shape (frame-local, NULL if
+ * the window isn't shaped) and the window's input shape: the buffer shows
+ * only the bounding shape, and WindowServer's input region is where both
+ * are. Returns TRUE if WindowServer's input region needs sending.
+ */
+static Bool
+nbFrameSetShape(nbFrame *frame, WindowPtr pWin, RegionPtr pShape)
+{
+    RegionPtr input = pWin != NULL ? wInputShape(pWin) : NULL;
+    Bool was = frame->shaped;
+
+    frame->shaped = pShape != NULL;
+    if (pShape != NULL)
+        RegionCopy(&frame->shape, pShape);
+    else
+        RegionEmpty(&frame->shape);
+    return was || frame->shaped || input != NULL;
+}
+
+/* Tell WindowServer where the frame takes pointer events. */
+static void
+nbFrameSendInputRegion(nbFrame *frame, WindowPtr pWin)
+{
+    RegionPtr input = pWin != NULL ? wInputShape(pWin) : NULL;
+    ws_rect_t *rects;
+    RegionRec r;
+    const BoxRec *box;
+    int i, n;
+
+    if (!(nbScreenInfo.server_flags & WS_SERVER_INPUT_REGION) ||
+        frame->wid == 0)
+        return;
+    if (!frame->shaped && input == NULL) {
+        if (ws_window_set_input_region(nbConnection(), frame->wid, NULL,
+                                       0) < 0)
+            nbWindowServerLost("input region");
+        return;
+    }
+    RegionNull(&r);
+    if (input != NULL) {
+        /* Relative to the window's inside, like the bounding shape. */
+        RegionCopy(&r, input);
+        RegionTranslate(&r, pWin->borderWidth, pWin->borderWidth);
+        if (frame->shaped)
+            RegionIntersect(&r, &r, &frame->shape);
+    } else {
+        RegionCopy(&r, &frame->shape);
+    }
+    n = RegionNumRects(&r);
+    box = RegionRects(&r);
+    rects = calloc(n > 0 ? n : 1, sizeof(*rects));
+    if (rects != NULL) {
+        for (i = 0; i < n; i++)
+            rects[i] = nbRect(box[i].x1, box[i].y1, box[i].x2 - box[i].x1,
+                              box[i].y2 - box[i].y1);
+        if (ws_window_set_input_region(nbConnection(), frame->wid, rects,
+                                       n) < 0)
+            nbWindowServerLost("input region");
+        free(rects);
+    }
+    RegionUninit(&r);
 }
 
 static Bool
@@ -339,27 +456,34 @@ nbCreateFrame(RootlessWindowPtr pFrame, ScreenPtr pScreen, int newX,
     frame->height = pFrame->height;
     frame->rwin = pFrame;
     RegionNull(&frame->damage);
+    RegionNull(&frame->shape);
     for (int i = 0; i < NB_NBUFFERS; i++)
         RegionNull(&frame->buffers[i].stale);
-    nbFrameStyle(pWin, &frame->level, &frame->flags, &frame->format);
+    nbFrameSetShape(frame, pWin, pShape);
+    nbFrameStyle(pWin, frame->shaped, &frame->level, &frame->flags,
+                 &frame->format);
 
-    /* TODO: shaped windows (pShape) need input regions in WindowServer. */
     r = nbRect(newX, newY, frame->width, frame->height);
     snprintf(title, sizeof(title), "X11 0x%x", (unsigned) pWin->drawable.id);
-    frame->wid = ws_window_create(nbConnection(), &r, frame->level,
-                                  frame->flags, title);
+    /* No round trip on a WindowServer with WS_SERVER_WINDOW_IDS. */
+    frame->wid = ws_window_create_nowait(nbConnection(), &r, frame->level,
+                                         frame->flags, title);
     if (frame->wid == 0) {
         ErrorF("Xnextbsd: can't create a WindowServer window: %s\n",
                strerror(errno));
         RegionUninit(&frame->damage);
+        RegionUninit(&frame->shape);
         free(frame);
         return FALSE;
     }
+    if (frame->shaped || wInputShape(pWin) != NULL)
+        nbFrameSendInputRegion(frame, pWin);
 
     /* The first buffer is made and attached by the first commit. */
     if (!nbBackingAlloc(frame, frame->width, frame->height)) {
         ws_window_destroy(nbConnection(), frame->wid);
         RegionUninit(&frame->damage);
+        RegionUninit(&frame->shape);
         free(frame);
         return FALSE;
     }
@@ -393,6 +517,7 @@ nbDestroyFrame(RootlessFrameID wid)
     for (int i = 0; i < NB_NBUFFERS; i++)
         RegionUninit(&frame->buffers[i].stale);
     RegionUninit(&frame->damage);
+    RegionUninit(&frame->shape);
     free(frame->bits);
     free(frame);
 }
@@ -524,16 +649,11 @@ nbResizeFrame(RootlessFrameID wid, ScreenPtr pScreen, int newX, int newY,
     frame->y = newY;
     frame->width = newW;
     frame->height = newH;
-    /*
-     * TODO: frame and buffer in one commit, so a resize can't show the new
-     * frame with the old buffer for a moment (a later WindowServer item).
-     */
+    /* The new frame goes with the first buffer at the new size. */
     r = nbRect(newX, newY, newW, newH);
-    if (ws_window_set_frame(nbConnection(), frame->wid, &r) < 0)
-        nbWindowServerLost("resize");
     RegionEmpty(&frame->damage);
     nbFrameDamageAll(frame);
-    nbFrameCommit(frame);
+    nbFrameCommitWithFrame(frame, &r);
 }
 
 /*
@@ -582,14 +702,47 @@ nbRestackFrame(RootlessFrameID wid, RootlessFrameID nextWid)
     }
 }
 
+/*
+ * X Shape: the bounding shape (pShape, frame-local, NULL if none) or the
+ * input shape changed. The buffers become ARGB8888 if they weren't (a
+ * shaped depth-24 window), WindowServer gets the new input region, and
+ * the whole frame is shown again with the new shape.
+ *
+ * Rootless reshapes before it resizes: when the X window has a new size
+ * the frame doesn't have yet, the resize's commit shows the new shape,
+ * so nothing is committed here at the old size.
+ */
 static void
 nbReshapeFrame(RootlessFrameID wid, RegionPtr pShape)
 {
-    /*
-     * TODO: shaped windows. WindowServer has no input regions yet; the
-     * frame stays rectangular, and rootless leaves the area outside the
-     * shape transparent in the buffer only for depth-32 windows.
-     */
+    nbFrame *frame = wid;
+    WindowPtr pWin = nbFrameWindow(frame);
+    int32_t level;
+    uint32_t flags, format;
+    Bool resizing;
+
+    if (pWin == NULL)
+        return;
+    if (!nbFrameSetShape(frame, pWin, pShape))
+        return;
+    nbFrameStyle(pWin, frame->shaped, &level, &flags, &format);
+    if (format != frame->format) {
+        /* New buffers in the new format, made by the next commit. */
+        nbBuffersDestroy(frame);
+        frame->frame_pending = FALSE;
+        frame->format = format;
+    }
+    if (flags != frame->flags) {
+        frame->flags = flags;
+        if (ws_window_set_flags(nbConnection(), frame->wid, flags) < 0)
+            nbWindowServerLost("flags");
+    }
+    nbFrameSendInputRegion(frame, pWin);
+    nbFrameDamageAll(frame);
+    resizing = frame->width != pWin->drawable.width + 2 * wBorderWidth(pWin) ||
+        frame->height != pWin->drawable.height + 2 * wBorderWidth(pWin);
+    if (!resizing)
+        nbFrameCommit(frame);
 }
 
 static void
@@ -671,7 +824,7 @@ nbSwitchWindow(RootlessWindowPtr pFrame, WindowPtr oldWin)
 
     frame->rwin = pFrame;
     /* The format stays: the buffer is the same. */
-    nbFrameStyle(pFrame->win, &level, &flags, &format);
+    nbFrameStyle(pFrame->win, frame->shaped, &level, &flags, &format);
     if (level != frame->level) {
         frame->level = level;
         ws_window_set_level(nbConnection(), frame->wid, level);
