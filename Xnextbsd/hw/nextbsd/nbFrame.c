@@ -468,9 +468,13 @@ nbConstrain(int size, int min, int max, int base, int inc)
     return size;
 }
 
-/* What a top-level window has around its client (a window manager's
-   title bar and borders): the frame's size minus the client's, borders
-   included. Resizing the frame leaves it as it is. */
+/*
+ * What a top-level window has around its client (a window manager's
+ * title bar and borders), which resizing the frame leaves as it is: the
+ * window manager's _NET_FRAME_EXTENTS on the client, or else the frame's
+ * size minus the client's, borders included (which is off while the
+ * window manager hasn't laid out a frame we just resized).
+ */
 typedef struct nbDecoration {
     WindowPtr client;
     int w, h;                   /* frame minus client, borders included */
@@ -480,10 +484,20 @@ typedef struct nbDecoration {
 static void
 nbFrameDecoration(WindowPtr top, nbDecoration *d)
 {
+    PropertyPtr prop;
+    const CARD32 *v;
+
     d->client = nbFrameClient(top);
     d->bw = wBorderWidth(d->client);
     if (d->client == top) {
         d->w = d->h = 0;
+        return;
+    }
+    prop = nbProperty(d->client, "_NET_FRAME_EXTENTS", 32);
+    if (prop != NULL && prop->size >= 4) {
+        v = prop->data;
+        d->w = (int) min(v[0] + v[1], 4096u) + 2 * wBorderWidth(top);
+        d->h = (int) min(v[2] + v[3], 4096u) + 2 * wBorderWidth(top);
         return;
     }
     d->w = max((int) top->drawable.width + 2 * wBorderWidth(top) -
@@ -1383,6 +1397,7 @@ nbPropertyFilter(CallbackListPtr *pcbl, void *unused, void *calldata)
     static const char *const watched[] = {
         NB_MINIMIZED_ATOM, "WM_NORMAL_HINTS", "WM_TRANSIENT_FOR",
         "_NET_WM_WINDOW_TYPE", "WM_STATE", "WM_NAME", "_NET_WM_NAME",
+        "_NET_FRAME_EXTENTS",
     };
     PropertyFilterParam *p = calldata;
     ScreenPtr pScreen = screenInfo.screens[0];

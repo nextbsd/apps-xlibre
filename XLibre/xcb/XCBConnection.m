@@ -1909,8 +1909,18 @@ static XCBConnection *sharedInstance;
         [frame setWindowRect:r];
         return;
     }
-    r.size.width = anEvent->width;
-    r.size.height = anEvent->height;
+    // Tiling may resize it several times before we get here: lay it out
+    // at the size it has now, not at an older one this event reports,
+    // which would make it bigger than its tile again.
+    xcb_get_geometry_reply_t *geometry =
+        xcb_get_geometry_reply(connection, xcb_get_geometry(connection, [frame window]), NULL);
+    if (geometry == NULL)
+        return;
+    r.position.x = geometry->x;
+    r.position.y = geometry->y;
+    r.size.width = geometry->width;
+    r.size.height = geometry->height;
+    free(geometry);
     XCBTitleBar *titleBar = (XCBTitleBar *)[frame childWindowForKey:TitleBar];
     [frame programmaticResizeToRect:r];
     // A client that can't be resized keeps its frame: cache what X has.
