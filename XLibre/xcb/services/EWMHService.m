@@ -724,80 +724,10 @@
 
         if (wasMinimized)
         {
-            if (frame)
-            {
-                [connection mapWindow:frame];
-                [frame setIsMinimized:NO];
-                [frame setNormalState];
-            }
-
-            if (titleBar)
-            {
-                [connection mapWindow:titleBar];
-                [titleBar drawTitleBarComponents];
-            }
-
-            if (clientWindow)
-            {
-                [connection mapWindow:clientWindow];
-                [clientWindow setIsMinimized:NO];
-                [clientWindow setNormalState];
-            }
-
-            XCBWindow *restoreTarget = frame ? (XCBWindow *)frame : aWindow;
-            if (restoreTarget)
-            {
-                xcb_get_property_reply_t *reply = [self getProperty:EWMHWMIconGeometry
-                                                      propertyType:XCB_ATOM_CARDINAL
-                                                         forWindow:aWindow
-                                                            delete:NO
-                                                            length:4];
-                XCBRect iconRect = XCBInvalidRect;
-                if (reply)
-                {
-                    int len = xcb_get_property_value_length(reply);
-                    if (len >= (int)(sizeof(uint32_t) * 4))
-                    {
-                        uint32_t *values = (uint32_t *)xcb_get_property_value(reply);
-                        XCBPoint pos = XCBMakePoint(values[0], values[1]);
-                        XCBSize size = XCBMakeSize((uint16_t)values[2], (uint16_t)values[3]);
-                        if (size.width > 0 && size.height > 0)
-                        {
-                            iconRect = XCBMakeRect(pos, size);
-                        }
-                    }
-                    free(reply);
-                }
-
-                if (!FnCheckXCBRectIsValid(iconRect))
-                {
-                    XCBScreen *screen = [aWindow screen];
-                    if (screen)
-                    {
-                        uint16_t iconSize = 48;
-                        double x = ((double)[screen width] - iconSize) * 0.5;
-                        double y = (double)[screen height] - iconSize;
-                        iconRect = XCBMakeRect(XCBMakePoint(x, y), XCBMakeSize(iconSize, iconSize));
-                    }
-                }
-
-                Class compositorClass = NSClassFromString(@"URSCompositingManager");
-                if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)])
-                {
-                    id<URSCompositingManaging> compositor = [compositorClass performSelector:@selector(sharedManager)];
-                    if (compositor && [compositor respondsToSelector:@selector(compositingActive)] &&
-                        [compositor compositingActive])
-                    {
-                        XCBRect endRect = [restoreTarget windowRect];
-                        if ([compositor respondsToSelector:@selector(animateWindowRestore:fromRect:toRect:)])
-                        {
-                            [compositor animateWindowRestore:[restoreTarget window]
-                                                  fromRect:iconRect
-                                                    toRect:endRect];
-                        }
-                    }
-                }
-            }
+            // Back from the Dock: WindowServer shows it again, raised,
+            // focused and with XLibre active.
+            [connection restoreMinimizedWindow:aWindow activate:YES];
+            return;
         }
 
         // Don't steal focus or raise if the window is already the topmost.
@@ -1212,10 +1142,14 @@
         {
             BOOL minimize = (action == _NET_WM_STATE_ADD) || (action == _NET_WM_STATE_TOGGLE && ![aWindow isMinimized]);
 
-            if (minimize)
+            if (minimize && ![aWindow isMinimized])
             {
+                // Through WM_CHANGE_STATE, as XIconifyWindow does.
                 [aWindow minimize];
-                [aWindow setIsMinimized:minimize];
+            }
+            else if (!minimize && [aWindow isMinimized])
+            {
+                [connection restoreMinimizedWindow:aWindow activate:YES];
             }
 
             [self updateNetWmState:aWindow];

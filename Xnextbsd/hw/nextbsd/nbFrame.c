@@ -88,6 +88,7 @@
 #include "dix/resource_priv.h"
 #include "dix/window_priv.h"
 #include "inputstr.h"
+#include "propertyst.h"
 #include "scrnintstr.h"
 #include "windowstr.h"
 #include "rootlessCommon.h"
