@@ -1,6 +1,6 @@
 //
 //  XLPasteboardBridge.h
-//  XLibre.app - X CLIPBOARD <-> GNUstep general pasteboard
+//  XLibre.app - X selections <-> GNUstep pasteboards
 //
 //  Copyright (c) 2026, Joseph Maloney
 //  SPDX-License-Identifier: MIT
@@ -9,14 +9,21 @@
 //  own XCB connection to Xnextbsd. gpbs can't do this itself: it opens
 //  DISPLAY once at login, before any X server exists.
 //
-//  - X to GNUstep: XFixes says when a client takes CLIPBOARD; the bridge
-//    converts it to UTF8_STRING (STRING if the owner can't), INCR
-//    included, and puts the text on the general pasteboard.
-//  - GNUstep to X: when the general pasteboard's change count moves and it
-//    holds a string, the bridge takes CLIPBOARD and answers TARGETS,
-//    UTF8_STRING, TEXT and STRING requests, with INCR for large text.
+//  Two selections, as xpbs bridges them: CLIPBOARD <-> the general
+//  pasteboard, and PRIMARY <-> the "Selection" pasteboard.
 //
-//  PRIMARY, images, RTF and drag and drop are later work (apps-xlibre#7).
+//  - X to GNUstep: XFixes says when a client takes a selection; the bridge
+//    asks for its TARGETS, then converts text (UTF8_STRING, else
+//    text/plain;charset=utf-8, else STRING), RTF (text/rtf,
+//    application/rtf or text/richtext) and an image (image/png, else
+//    image/tiff), INCR included, and puts them on the pasteboard together.
+//    Images go on as both TIFF and PNG. An owner without TARGETS gets
+//    asked for UTF8_STRING, then STRING.
+//  - GNUstep to X: when a pasteboard's change count moves, the bridge
+//    takes the selection and answers TARGETS and the targets above (TEXT
+//    as UTF8_STRING) from what the pasteboard held, INCR for large data.
+//
+//  Drag and drop is later work (apps-xlibre#7).
 //
 
 #import <Foundation/Foundation.h>

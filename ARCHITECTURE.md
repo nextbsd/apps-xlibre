@@ -16,7 +16,8 @@ compositor, window switcher, keyboard grabs, snapping and Gershwin menu.
                               └── Xnextbsd windows (one per top-level X window)
    XLibre.app ── XCB ── Xnextbsd ── X11 ── xterm, ...
        ├── window manager: reparents X windows, draws NextBSD title bars
-       └── clipboard bridge: CLIPBOARD <-> the general pasteboard (gpbs)
+       └── clipboard bridge: CLIPBOARD <-> the general pasteboard,
+                             PRIMARY <-> the "Selection" pasteboard (gpbs)
 ```
 
 ## Directory Layout
@@ -26,7 +27,7 @@ XLibre/
 ├── main.m                          Entry point, signal handling
 ├── XLibreController.h/m            App delegate: menus, launch, Hide, Quit
 ├── XLServer.h/m                    The Xnextbsd child: cookie, -displayfd, join
-├── XLPasteboardBridge.h/m          X CLIPBOARD <-> GNUstep pasteboard
+├── XLPasteboardBridge.h/m          X selections <-> GNUstep pasteboards
 ├── XLibre.png, XLibreInfo.plist    Icon and Info.plist
 ├── GNUmakefile                     Builds and installs XLibre.app
 │
@@ -88,8 +89,11 @@ XLibre/
   X windows mapped). Focus follows WindowServer's key window inside
   Xnextbsd, and override-redirect windows get the popup level there.
 - **The clipboard bridge and gpbs:** NSPasteboard. The bridge owns
-  CLIPBOARD for the pasteboard's text and copies new X owners' text to it
-  (UTF8_STRING or STRING, TARGETS, INCR).
+  CLIPBOARD for the general pasteboard and PRIMARY for the "Selection"
+  pasteboard, as xpbs does, and copies new X owners' data to them: text
+  (UTF8_STRING or STRING), RTF and PNG/TIFF images, with TARGETS and
+  INCR. xterm's selections also go to CLIPBOARD (XTerm*selectToClipboard)
+  unless XLibreSelectToClipboard is turned off.
 
 ## Layers
 
