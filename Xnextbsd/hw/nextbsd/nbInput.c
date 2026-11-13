@@ -735,15 +735,38 @@ nbFocusCheck(void)
  * pointer grab, or tracking while we are active), about none: X then
  * sees the pointer over the root window.
  */
+/*
+ * Where a pointer event is in X's pixels. WindowServer's coordinates are
+ * points (with sub-point precision): over one of our frames, the place in
+ * the window, times the scale, from X's corner of the frame, which is
+ * where the buffer's first pixel is (nextbsd.h, "Points and pixels");
+ * elsewhere the screen position times the scale.
+ */
+static void
+nbPointerPixels(const ws_event_t *ev, nbFrame *frame, double *x, double *y)
+{
+    double s = nbScreenInfo.scale;
+
+    if (frame != NULL && s != 1) {
+        *x = frame->x + ev->u.pointer.x * s;
+        *y = frame->y + ev->u.pointer.y * s;
+    } else {
+        *x = ev->u.pointer.screen_x * s;
+        *y = ev->u.pointer.screen_y * s;
+    }
+}
+
 static void
 nbPointerEvent(const ws_event_t *ev, Bool entered)
 {
     nbFrame *frame = nbFrameFromWID(ev->hdr.window);
+    double x, y;
 
     if (frame == NULL && ev->hdr.window != 0)
         return;
     nbScreenInfo.pointer_frame = frame;
-    nbPointerMotion(ev->u.pointer.screen_x, ev->u.pointer.screen_y);
+    nbPointerPixels(ev, frame, &x, &y);
+    nbPointerMotion(x, y);
 }
 
 /*
@@ -761,7 +784,7 @@ nbPointerResync(void)
     if (pi.window != 0 && nbFrameFromWID(pi.window) == NULL)
         return;
     nbScreenInfo.pointer_frame = nbFrameFromWID(pi.window);
-    nbPointerMotion(pi.x, pi.y);
+    nbPointerMotion(pi.x * nbScreenInfo.scale, pi.y * nbScreenInfo.scale);
 }
 
 static void
@@ -785,8 +808,11 @@ nbHandleEvent(ws_connection_t *conn, const ws_event_t *ev, void *context)
          */
         frame = nbFrameFromWID(ev->hdr.window);
         if (frame != NULL && frame == nbScreenInfo.pointer_frame) {
+            double x, y;
+
             nbScreenInfo.pointer_frame = NULL;
-            nbPointerMotion(ev->u.pointer.screen_x, ev->u.pointer.screen_y);
+            nbPointerPixels(ev, NULL, &x, &y);
+            nbPointerMotion(x, y);
         }
         break;
 

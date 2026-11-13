@@ -53,6 +53,13 @@
  * Against a WindowServer without WS_SERVER_CAPTURE, or an older
  * libWindowServerClient without the capture calls, the root reads
  * black, as it did.
+ *
+ * HiDPI: screen captures are the panel's pixels, which needn't be the X
+ * screen's (a "looks like" mode that WindowServer scales to the panel,
+ * or -lowres). On a WindowServer with WS_SERVER_SCALE the stream is asked
+ * for at the X screen's size, so WindowServer scales it; should the X
+ * screen change size while it runs, frames are scaled to it here
+ * (nearest pixel) until the stream starts again.
  */
 
 #include <dix-config.h>
@@ -241,7 +248,14 @@ nbCaptureStart(nbCapture *cap)
 
     if (cap->state != NB_CAPTURE_NONE || !nbCaptureAvailable())
         return;
-    cap->stream = ws_capture_start_for(nbConnection(), 0, 0, 0, 0,
+    /* at the X screen's size where WindowServer may differ from it */
+    cap->stream = ws_capture_start_for(nbConnection(), 0, 0,
+                                       (nbScreenInfo.server_flags &
+                                        WS_SERVER_SCALE) ?
+                                       (uint32_t) nbScreenInfo.width : 0,
+                                       (nbScreenInfo.server_flags &
+                                        WS_SERVER_SCALE) ?
+                                       (uint32_t) nbScreenInfo.height : 0,
                                        NB_CAPTURE_FPS, (int32_t) cap->pid,
                                        cap->name, &flags);
     if (cap->stream == 0) {
@@ -292,6 +306,31 @@ nbCaptureFill(nbCapture *cap, int sx, int sy, int w, int h,
     if (cap == NULL || cap->state != NB_CAPTURE_RUNNING ||
         !cap->have_frame || cap->data == NULL)
         return;
+    if (cap->width == 0 || cap->height == 0)
+        return;
+    if (cap->width != (uint32_t) nbScreenInfo.width ||
+        cap->height != (uint32_t) nbScreenInfo.height) {
+        /* a frame of another size than X's screen: nearest pixel */
+        for (y = 0; y < h; y++) {
+            int fy = (int) ((int64_t) (sy + y) * cap->height /
+                            nbScreenInfo.height);
+            const uint32_t *src;
+            uint32_t *out = (uint32_t *) (void *) (dst + (size_t) y * dstride);
+
+            if (sy + y < 0 || fy >= (int) cap->height)
+                continue;
+            src = (const uint32_t *) (const void *)
+                (cap->data + (size_t) fy * cap->stride);
+            for (x = 0; x < w; x++) {
+                int fx = (int) ((int64_t) (sx + x) * cap->width /
+                                nbScreenInfo.width);
+
+                if (sx + x >= 0 && fx < (int) cap->width)
+                    out[x] = src[fx] & (uint32_t) planeMask;
+            }
+        }
+        return;
+    }
     x0 = sx < 0 ? -sx : 0;
     x1 = sx + w > (int) cap->width ? (int) cap->width - sx : w;
     if (x1 <= x0)
@@ -513,12 +552,24 @@ nbCaptureDamageRoot(nbCapture *cap, const ws_event_capture_frame_t *f)
         pScreen->root == NULL)
         return;
     for (i = 0; i < f->ndamage && i < WS_CAPTURE_MAX_DAMAGE; i++) {
+        int64_t x1 = f->damage[i].x, y1 = f->damage[i].y;
+        int64_t x2 = x1 + f->damage[i].width, y2 = y1 + f->damage[i].height;
+
         if (f->damage[i].width <= 0 || f->damage[i].height <= 0)
             continue;
-        rects[n].x = (INT16) f->damage[i].x;
-        rects[n].y = (INT16) f->damage[i].y;
-        rects[n].width = (CARD16) f->damage[i].width;
-        rects[n].height = (CARD16) f->damage[i].height;
+        if (cap->width != 0 && cap->height != 0 &&
+            (cap->width != (uint32_t) nbScreenInfo.width ||
+             cap->height != (uint32_t) nbScreenInfo.height)) {
+            /* frame pixels to X's, rounded out */
+            x1 = x1 * nbScreenInfo.width / cap->width;
+            y1 = y1 * nbScreenInfo.height / cap->height;
+            x2 = (x2 * nbScreenInfo.width + cap->width - 1) / cap->width;
+            y2 = (y2 * nbScreenInfo.height + cap->height - 1) / cap->height;
+        }
+        rects[n].x = (INT16) x1;
+        rects[n].y = (INT16) y1;
+        rects[n].width = (CARD16) (x2 - x1);
+        rects[n].height = (CARD16) (y2 - y1);
         n++;
     }
     if (n == 0)

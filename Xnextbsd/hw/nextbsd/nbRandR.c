@@ -51,6 +51,16 @@
  * Dock (WS_EVENT_USABLE_AREA), is published for the window manager on the
  * root window as NB_USABLE_AREA_ATOM, so it can place new windows inside
  * it and keep frames there after a screen change.
+ *
+ * HiDPI: WindowServer's screen is in points, X's in pixels, scale of them
+ * per point (WindowServer's backing scale, or 1 with -lowres). A new
+ * scale (the user picked another "looks like" size) changes X's screen
+ * size like a mode change does, or not at all when the pixels stay the
+ * same (a 3840 x 2160 panel at 1x, then looking like 1920 x 1080 at 2x),
+ * and then every frame is shown at the new scale (nbFramesRescale), the
+ * cursors are made again and NB_SCALE_ATOM tells XLibre.app. X windows
+ * keep their size in pixels: their clients pick the new scale up from
+ * XLibre.app's settings (XSETTINGS, Xft.dpi) as they can.
  */
 
 #include <dix-config.h>
@@ -73,6 +83,8 @@
 #include "rootless.h"
 
 #include "nextbsd.h"
+
+static void nbScaleChanged(void);
 
 static RRCrtcPtr nbCrtc;
 static RROutputPtr nbOutput;
@@ -204,33 +216,54 @@ nbScreenChanged(const ws_screen_info_t *si)
     WindowPtr pRoot;
     DeviceIntPtr pointer;
     BoxRec bounds;
-    int width = si->width, height = si->height;
+    unsigned int scale = nbDrawScale(si), old_scale = nbScreenInfo.scale;
+    int width = si->width * scale, height = si->height * scale;
+    int mm_width, mm_height;
 
     if (si->refresh_mhz != 0)
         nbScreenInfo.refresh_mhz = si->refresh_mhz;
     if (pScreen == NULL || (pRoot = pScreen->root) == NULL ||
         width <= 0 || height <= 0 || width > MAXSHORT || height > MAXSHORT)
         return;
-    if (width == pScreen->width && height == pScreen->height)
-        return;
-
-    LogMessageVerb(X_INFO, 0, "Xnextbsd: WindowServer's screen changed: "
-                   "%dx%d -> %dx%d\n", pScreen->width, pScreen->height,
-                   width, height);
-
+    nbScreenInfo.ws_scale = nbBackingScale(si);
+    if (scale != old_scale) {
+        LogMessageVerb(X_INFO, 0, "Xnextbsd: WindowServer's scale changed: "
+                       "%u -> %u pixels per point\n", old_scale, scale);
+        /* From here on frames, pointer events and the usable area are
+           taken at the new scale. */
+        nbScreenInfo.scale = scale;
+        nbScreenInfo.scale_dirty = TRUE;
+        nbScreenInfo.usable_dirty = TRUE;
+    }
     /*
      * The physical size WindowServer reports, or, without one, the same
-     * resolution as before (QuartzUpdateScreens).
+     * resolution as before (QuartzUpdateScreens), or 96 dpi per point
+     * when the scale changed.
      */
     if (si->mm_width > 0 && si->mm_height > 0) {
-        pScreen->mmWidth = si->mm_width;
-        pScreen->mmHeight = si->mm_height;
+        mm_width = si->mm_width;
+        mm_height = si->mm_height;
+    } else if (scale != old_scale) {
+        mm_width = (int) (width * 25.4 / (96.0 * scale) + 0.5);
+        mm_height = (int) (height * 25.4 / (96.0 * scale) + 0.5);
     } else {
-        pScreen->mmWidth = pScreen->mmWidth * ((double) width /
-                                               pScreen->width) + 0.5;
-        pScreen->mmHeight = pScreen->mmHeight * ((double) height /
-                                                 pScreen->height) + 0.5;
+        mm_width = pScreen->mmWidth * ((double) width / pScreen->width) + 0.5;
+        mm_height = pScreen->mmHeight * ((double) height / pScreen->height) +
+            0.5;
     }
+    if (width == pScreen->width && height == pScreen->height &&
+        mm_width == pScreen->mmWidth && mm_height == pScreen->mmHeight) {
+        if (scale != old_scale)
+            nbScaleChanged();
+        return;
+    }
+
+    LogMessageVerb(X_INFO, 0, "Xnextbsd: WindowServer's screen changed: "
+                   "%dx%d -> %dx%d pixels\n", pScreen->width,
+                   pScreen->height, width, height);
+
+    pScreen->mmWidth = mm_width;
+    pScreen->mmHeight = mm_height;
     pScreen->width = width;
     pScreen->height = height;
     nbScreenInfo.width = width;
@@ -271,6 +304,22 @@ nbScreenChanged(const ws_screen_info_t *si)
     nbRandRSetCurrent(pScreen);
     RRScreenSizeNotify(pScreen);
     RRTellChanged(pScreen);
+
+    if (scale != old_scale)
+        nbScaleChanged();
+}
+
+/*
+ * The scale X draws at changed: the frames, the cursors and the root
+ * window's NB_SCALE_ATOM and NB_USABLE_AREA_ATOM follow it.
+ */
+static void
+nbScaleChanged(void)
+{
+    nbFramesRescale();
+    nbCursorRescale();
+    nbScalePublish();
+    nbUsableAreaPublish();
 }
 
 /* ---- the usable area ---- */
@@ -293,10 +342,11 @@ nbUsableAreaPublish(void)
     atom = MakeAtom(NB_USABLE_AREA_ATOM, strlen(NB_USABLE_AREA_ATOM), TRUE);
     if (atom == None)
         return;
-    value[0] = nbScreenInfo.usable.x;
-    value[1] = nbScreenInfo.usable.y;
-    value[2] = nbScreenInfo.usable.width;
-    value[3] = nbScreenInfo.usable.height;
+    /* WindowServer's points, in X's pixels */
+    value[0] = nbScreenInfo.usable.x * nbScreenInfo.scale;
+    value[1] = nbScreenInfo.usable.y * nbScreenInfo.scale;
+    value[2] = nbScreenInfo.usable.width * nbScreenInfo.scale;
+    value[3] = nbScreenInfo.usable.height * nbScreenInfo.scale;
     if (dixChangeWindowProperty(serverClient, pScreen->root, atom,
                                 XA_CARDINAL, 32, PropModeReplace, 4, value,
                                 TRUE) == Success)
@@ -311,7 +361,8 @@ nbUsableAreaPublish(void)
 void
 nbUsableAreaChanged(const ws_rect_t *usable)
 {
-    ws_rect_t r = { 0, 0, nbScreenInfo.width, nbScreenInfo.height };
+    ws_rect_t r = { 0, 0, nbScreenInfo.width / (int) nbScreenInfo.scale,
+                    nbScreenInfo.height / (int) nbScreenInfo.scale };
 
     if (usable != NULL && usable->width > 0 && usable->height > 0)
         r = *usable;

@@ -73,6 +73,13 @@
  * property on its frame, the frame is minimized on WindowServer while the
  * X window stays mapped (so the Dock's preview of it is live), and
  * WindowServer's WS_EVENT_WINDOW_RESTORE goes back to the window manager.
+ *
+ * HiDPI (WS_SERVER_SCALE): X draws at nbScreenInfo.scale pixels per
+ * WindowServer point. Frames, damage, input regions and size limits go
+ * to WindowServer in points (nbPixelFrameToPoints in nextbsd.h), and the
+ * buffers carry the scale, so WindowServer shows them pixel for pixel.
+ * When the scale changes, every frame gets new buffers and its frame in
+ * the new points (nbFramesRescale).
  */
 
 #include <dix-config.h>
@@ -126,17 +133,26 @@ nbFrameWindow(nbFrame *frame)
     return frame != NULL && frame->rwin != NULL ? frame->rwin->win : NULL;
 }
 
-/* A buffer of at least 1x1 (WindowServer refuses empty ones). */
+/*
+ * A buffer for a frame of width x height X pixels: at least one point,
+ * padded to whole points (WindowServer refuses empty ones), with the
+ * scale X draws at.
+ */
 static ws_buffer_t *
-nbBufferCreate(unsigned int width, unsigned int height, uint32_t format)
+nbBufferCreate(nbBuffer *buf, unsigned int width, unsigned int height,
+               uint32_t format)
 {
+    unsigned int s = nbScreenInfo.scale;
+    unsigned int w = nbPixelsToPointsUp((int) (width ? width : 1)) * s;
+    unsigned int h = nbPixelsToPointsUp((int) (height ? height : 1)) * s;
     ws_buffer_t *buffer;
 
-    buffer = ws_buffer_create_format(nbConnection(), width ? width : 1,
-                                     height ? height : 1, 1, format);
+    buffer = ws_buffer_create_format(nbConnection(), w, h, s, format);
     if (buffer == NULL)
         ErrorF("Xnextbsd: can't make a %ux%u window buffer: %s\n",
-               width, height, strerror(errno));
+               w, h, strerror(errno));
+    buf->width = w;
+    buf->height = h;
     return buffer;
 }
 
@@ -219,6 +235,31 @@ nbBufferUpdate(nbFrame *frame, nbBuffer *buf, RegionPtr region)
         for (y = box[i].y1; y < box[i].y2; y++)
             memset(dst + (size_t) y * dstride + box[i].x1 * 4, 0, len);
     }
+
+    /*
+     * A frame of an odd size on a 2x screen: the buffer has whole points,
+     * up to scale - 1 pixels more than the frame. Repeat the last column
+     * and row into them, so the window's edge shows there.
+     */
+    if (buf->width > frame->width || buf->height > frame->height) {
+        RegionUnion(&in, &in, &out);
+        box = RegionExtents(&in);
+        if (RegionNotEmpty(&in) && frame->width > 0 && frame->height > 0) {
+            if (buf->width > frame->width && box->x2 >= (int) frame->width)
+                for (y = box->y1; y < box->y2; y++) {
+                    uint32_t *row = (uint32_t *) (dst + (size_t) y * dstride);
+
+                    for (x = frame->width; x < (int) buf->width; x++)
+                        row[x] = row[frame->width - 1];
+                }
+            if (buf->height > frame->height &&
+                box->y2 >= (int) frame->height)
+                for (y = frame->height; y < (int) buf->height; y++)
+                    memcpy(dst + (size_t) y * dstride,
+                           dst + (size_t) (frame->height - 1) * dstride,
+                           (size_t) buf->width * 4);
+        }
+    }
     RegionUninit(&in);
     RegionUninit(&out);
 }
@@ -239,7 +280,7 @@ nbFrameFreeBuffer(nbFrame *frame)
         if (buf->busy)
             continue;
         if (buf->ws == NULL) {
-            buf->ws = nbBufferCreate(frame->width, frame->height,
+            buf->ws = nbBufferCreate(buf, frame->width, frame->height,
                                      frame->format);
             if (buf->ws == NULL)
                 continue;
@@ -294,9 +335,14 @@ nbFrameCommitWithFrame(nbFrame *frame, const ws_rect_t *rect)
         box = RegionExtents(&frame->damage);
         n = 1;
     }
-    for (i = 0; i < n; i++)
-        rects[i] = nbRect(box[i].x1, box[i].y1, box[i].x2 - box[i].x1,
-                          box[i].y2 - box[i].y1);
+    /* in points, rounded out */
+    for (i = 0; i < n; i++) {
+        int x1 = nbPixelsToPointsDown(box[i].x1);
+        int y1 = nbPixelsToPointsDown(box[i].y1);
+
+        rects[i] = nbRect(x1, y1, nbPixelsToPointsUp(box[i].x2) - x1,
+                          nbPixelsToPointsUp(box[i].y2) - y1);
+    }
     RegionEmpty(&frame->damage);
 
     if (ws_window_attach(nbConnection(), frame->wid, buf->ws) < 0 ||
@@ -651,9 +697,15 @@ nbFrameSendInputRegion(nbFrame *frame, WindowPtr pWin)
     box = RegionRects(&r);
     rects = calloc(n > 0 ? n : 1, sizeof(*rects));
     if (rects != NULL) {
-        for (i = 0; i < n; i++)
-            rects[i] = nbRect(box[i].x1, box[i].y1, box[i].x2 - box[i].x1,
-                              box[i].y2 - box[i].y1);
+        /* in points: where any pixel of a point takes events, all of it
+           does */
+        for (i = 0; i < n; i++) {
+            int x1 = nbPixelsToPointsDown(box[i].x1);
+            int y1 = nbPixelsToPointsDown(box[i].y1);
+
+            rects[i] = nbRect(x1, y1, nbPixelsToPointsUp(box[i].x2) - x1,
+                              nbPixelsToPointsUp(box[i].y2) - y1);
+        }
         if (ws_window_set_input_region(nbConnection(), frame->wid, rects,
                                        n) < 0)
             nbWindowServerLost("input region");
@@ -687,7 +739,7 @@ nbCreateFrame(RootlessWindowPtr pFrame, ScreenPtr pScreen, int newX,
     nbFrameStyle(pWin, frame->shaped, &frame->level, &frame->flags,
                  &frame->format);
 
-    r = nbRect(newX, newY, frame->width, frame->height);
+    r = nbPixelFrameToPoints(newX, newY, frame->width, frame->height);
     snprintf(title, sizeof(title), "X11 0x%x", (unsigned) pWin->drawable.id);
     /* No round trip on a WindowServer with WS_SERVER_WINDOW_IDS. */
     frame->wid = ws_window_create_nowait(nbConnection(), &r, frame->level,
@@ -760,7 +812,7 @@ nbMoveFrame(RootlessFrameID wid, ScreenPtr pScreen, int newX, int newY)
         return;
     frame->x = newX;
     frame->y = newY;
-    r = nbRect(newX, newY, frame->width, frame->height);
+    r = nbPixelFrameToPoints(newX, newY, frame->width, frame->height);
     if (ws_window_set_frame(nbConnection(), frame->wid, &r) < 0)
         nbWindowServerLost("move");
 }
@@ -780,11 +832,20 @@ nbMoveFrame(RootlessFrameID wid, ScreenPtr pScreen, int newX, int newY)
  * leaves X with another frame than WindowServer's (smaller than a tile,
  * or a move another client redirected), WindowServer gets X's: tiling
  * keeps a smaller window at its tile's top-left corner.
+ *
+ * WindowServer's frame is in points: X takes it times the scale, unless
+ * it is the frame X's own already makes (an odd X size or place rounds
+ * to it, nbPixelFrameToPoints), so that X's pixels stay as they are.
  */
 void
-nbFrameSetByWindowServer(nbFrame *frame, const ws_rect_t *r)
+nbFrameSetByWindowServer(nbFrame *frame, const ws_rect_t *pr)
 {
     WindowPtr pWin = nbFrameWindow(frame);
+    ws_rect_t had = nbPixelFrameToPoints(frame->x, frame->y, frame->width,
+                                         frame->height);
+    ws_rect_t rr, *r = &rr;
+    int s = (int) nbScreenInfo.scale;
+    Bool moved, sized;
     ClientPtr owner;
     nbDecoration d;
     nbSizeHints h;
@@ -793,10 +854,15 @@ nbFrameSetByWindowServer(nbFrame *frame, const ws_rect_t *r)
     int bw, cw, ch, w, hgt, x, y;
     ws_rect_t now;
 
-    if (r->x == frame->x && r->y == frame->y &&
-        (unsigned) r->width == frame->width &&
-        (unsigned) r->height == frame->height)
+    moved = pr->x != had.x || pr->y != had.y;
+    sized = pr->width != had.width || pr->height != had.height;
+    if (!moved && !sized)
         return;
+    /* In X pixels; what didn't change in points stays as X has it. */
+    rr.x = moved ? pr->x * s : frame->x;
+    rr.y = moved ? pr->y * s : frame->y;
+    rr.width = sized ? pr->width * s : (int) frame->width;
+    rr.height = sized ? pr->height * s : (int) frame->height;
     frame->x = r->x;
     frame->y = r->y;
     if (pWin == NULL || pWin->parent == NULL)
@@ -805,8 +871,8 @@ nbFrameSetByWindowServer(nbFrame *frame, const ws_rect_t *r)
     bw = wBorderWidth(pWin);
     vlist[0] = (XID) (INT16) (r->x - pWin->parent->drawable.x);
     vlist[1] = (XID) (INT16) (r->y - pWin->parent->drawable.y);
-    if ((unsigned) r->width != frame->width ||
-        (unsigned) r->height != frame->height) {
+    if (sized && ((unsigned) r->width != frame->width ||
+                  (unsigned) r->height != frame->height)) {
         nbFrameDecoration(pWin, &d);
         nbReadSizeHints(d.client, &h);
         cw = nbConstrain(r->width - d.w - 2 * d.bw, h.min_w, h.max_w,
@@ -831,10 +897,11 @@ nbFrameSetByWindowServer(nbFrame *frame, const ws_rect_t *r)
     y = pWin->drawable.y - wBorderWidth(pWin);
     w = pWin->drawable.width + 2 * wBorderWidth(pWin);
     hgt = pWin->drawable.height + 2 * wBorderWidth(pWin);
-    if (x != r->x || y != r->y || w != r->width || hgt != r->height) {
-        frame->x = x;
-        frame->y = y;
-        now = nbRect(x, y, w, hgt);
+    frame->x = x;
+    frame->y = y;
+    now = nbPixelFrameToPoints(x, y, w, hgt);
+    if (now.x != pr->x || now.y != pr->y || now.width != pr->width ||
+        now.height != pr->height) {
         if (ws_window_set_frame(nbConnection(), frame->wid, &now) < 0)
             nbWindowServerLost("frame");
     }
@@ -916,7 +983,7 @@ nbResizeFrame(RootlessFrameID wid, ScreenPtr pScreen, int newX, int newY,
     frame->width = newW;
     frame->height = newH;
     /* The new frame goes with the first buffer at the new size. */
-    r = nbRect(newX, newY, newW, newH);
+    r = nbPixelFrameToPoints(newX, newY, newW, newH);
     /* What's around the client may have changed with it. */
     nbScreenInfo.frames_dirty = TRUE;
     RegionEmpty(&frame->damage);
@@ -1300,10 +1367,15 @@ nbFrameSendSizeLimits(nbFrame *frame, WindowPtr pWin)
     nbReadSizeHints(d.client, &h);
     extra_w = d.w + 2 * d.bw;
     extra_h = d.h + 2 * d.bw;
-    limits[0] = h.has_min ? (uint32_t) (h.min_w + extra_w) : 0;
-    limits[1] = h.has_min ? (uint32_t) (h.min_h + extra_h) : 0;
-    limits[2] = h.max_w > 0 ? (uint32_t) (h.max_w + extra_w) : 0;
-    limits[3] = h.max_h > 0 ? (uint32_t) (h.max_h + extra_h) : 0;
+    /* in points, rounded up: X keeps the client within its hints */
+    limits[0] = h.has_min ?
+        (uint32_t) nbPixelsToPointsUp(h.min_w + extra_w) : 0;
+    limits[1] = h.has_min ?
+        (uint32_t) nbPixelsToPointsUp(h.min_h + extra_h) : 0;
+    limits[2] = h.max_w > 0 ?
+        (uint32_t) nbPixelsToPointsUp(h.max_w + extra_w) : 0;
+    limits[3] = h.max_h > 0 ?
+        (uint32_t) nbPixelsToPointsUp(h.max_h + extra_h) : 0;
     if (memcmp(limits, frame->limits, sizeof(limits)) == 0)
         return;
     memcpy(frame->limits, limits, sizeof(limits));
@@ -1347,6 +1419,39 @@ nbFramesUpdate(void)
         if (nbConnection() == NULL)
             return;
     }
+}
+
+/*
+ * The scale X draws at changed (WS_EVENT_SCREEN_CHANGED with a new
+ * backing scale, nbScreenChanged). X's windows keep their pixels; every
+ * frame gets buffers at the new scale and its frame in the new points,
+ * together in one commit, and its input region and size limits again.
+ */
+void
+nbFramesRescale(void)
+{
+    nbFrame *frame;
+    ws_rect_t r;
+
+    if (nbConnection() == NULL)
+        return;
+    xorg_list_for_each_entry(frame, &nbScreenInfo.frames, link) {
+        if (frame->wid == 0)
+            continue;
+        nbBuffersDestroy(frame);
+        frame->frame_pending = FALSE;
+        memset(frame->limits, 0xff, sizeof(frame->limits));
+        if (frame->shaped || (nbFrameWindow(frame) != NULL &&
+                              wInputShape(nbFrameWindow(frame)) != NULL))
+            nbFrameSendInputRegion(frame, nbFrameWindow(frame));
+        r = nbPixelFrameToPoints(frame->x, frame->y, frame->width,
+                                 frame->height);
+        nbFrameDamageAll(frame);
+        nbFrameCommitWithFrame(frame, &r);
+        if (nbConnection() == NULL)
+            return;
+    }
+    nbScreenInfo.frames_dirty = TRUE;
 }
 
 /*

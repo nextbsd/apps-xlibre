@@ -19,6 +19,14 @@
 
 @interface URSDecorationMetrics : NSObject
 
+// X pixels per point (XLScaleSettings: Xnextbsd's _XNEXTBSD_SCALE). The
+// theme's sizes are points; the metrics below that are X geometry (title
+// and resize bar heights, the border, corner radii) are pixels, the
+// theme's times the scale, while button frames and drawing stay in the
+// theme's points (URSThemeIntegration draws them scaled).
++ (NSUInteger)scale;
++ (void)setScale:(NSUInteger)scale;
+
 // Vertical metrics, in pixels
 + (uint16_t)titlebarHeight;
 + (uint16_t)resizebarHeight;
@@ -49,12 +57,13 @@
 + (NSArray *)buttonsForStyleMask:(NSUInteger)styleMask;
 
 // Button frame inside a title bar of the given size, in unflipped
-// (AppKit, origin bottom-left) coordinates.
+// (AppKit, origin bottom-left) coordinates, in points.
 + (NSRect)frameForButton:(NSWindowButton)button
             titleBarSize:(NSSize)size
                styleMask:(NSUInteger)styleMask;
 
-// Hit test using X11 (origin top-left) coordinates. Returns -1 for none.
+// Hit test using X11 (origin top-left) coordinates, in pixels, in a title
+// bar of `size` pixels. Returns -1 for none.
 + (NSInteger)buttonAtX11Point:(NSPoint)point
                  titleBarSize:(NSSize)size
                     styleMask:(NSUInteger)styleMask;
@@ -65,7 +74,7 @@
               highlighted:(BOOL)highlighted
            documentEdited:(BOOL)edited;
 
-// Corner radii for decorated windows. Top corners round the title bar; bottom
+// Corner radii for decorated windows, in pixels. Top corners round the title bar; bottom
 // corners round the resize bar, so they are 0 for windows without one.
 // TODO(libs-gui): themes provide these through the informal
 // -titlebarCornerRadius / -windowBottomCornerRadius methods for now.

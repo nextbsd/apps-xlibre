@@ -29,6 +29,7 @@
 #import "XCBFrame.h"
 #import "URSThemeIntegration.h"
 #import "URSDecorationMetrics.h"
+#import "XLScaleSettings.h"
 
 @implementation URSHybridEventHandler
 
@@ -93,6 +94,14 @@
                                                         selector:@selector(themePreferenceDidChange:)
                                                             name:@"GSThemePreferenceDidChangeNotification"
                                                           object:nil];
+
+    // HiDPI: a new scale makes title bars and borders another size in X
+    // pixels (URSDecorationMetrics); lay every frame out again, as for a
+    // new theme.
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(themeDidActivate:)
+                                                 name:XLScaleDidChangeNotification
+                                               object:nil];
 
     // Wire selectionManagerWindow into the focus manager now that it exists
     self.focusManager.selectionManagerWindow = self.selectionManagerWindow;

@@ -23,6 +23,10 @@
 //    XLibreXResources       X resources loaded into the new server
 //                           (default: XTerm*selectToClipboard: true, so
 //                           xterm's selection and paste use CLIPBOARD)
+//    XLibreLowResolution    on a HiDPI display, run X programs at 1x and
+//                           let WindowServer scale them up, as XQuartz
+//                           does (Xnextbsd -lowres; default NO: they
+//                           draw at the display's scale, XLScaleSettings)
 //    XLibreServerPath       an Xnextbsd other than Resources/Xnextbsd
 //    XLibreServerArguments  extra arguments for Xnextbsd
 //

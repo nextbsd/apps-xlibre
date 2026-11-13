@@ -32,6 +32,7 @@ $(APP_NAME)_OBJC_FILES = \
 		XLibreController.m \
 		XLServer.m \
 		XLPasteboardBridge.m \
+		XLScaleSettings.m \
 		URSHybridEventHandler.m \
 		URSFocusManager.m \
 		URSWorkareaManager.m \

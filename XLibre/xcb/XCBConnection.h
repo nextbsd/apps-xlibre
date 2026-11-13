@@ -60,7 +60,8 @@
 @property (nonatomic, assign) xcb_timestamp_t expectedFocusTimestamp;
 
 @property (nonatomic, assign) BOOL adoptingExistingWindows;
-// Where a window that doesn't ask for a position goes (top-left corner).
+// Where a window that doesn't ask for a position goes (top-left corner),
+// in points: times URSDecorationMetrics' scale in X pixels.
 @property (nonatomic, assign) int16_t placementX;
 @property (nonatomic, assign) int16_t placementY;
 // Where a new window without a position of its own goes: the placement

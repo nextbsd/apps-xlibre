@@ -28,6 +28,7 @@ XLibre/
 ├── XLibreController.h/m            App delegate: menus, launch, Hide, Quit
 ├── XLServer.h/m                    The Xnextbsd child: cookie, -displayfd, join
 ├── XLPasteboardBridge.h/m          X selections <-> GNUstep pasteboards
+├── XLScaleSettings.h/m             HiDPI: Xft.dpi, XSETTINGS, toolkit env
 ├── XLibre.png, XLibreInfo.plist    Icon and Info.plist
 ├── GNUmakefile                     Builds and installs XLibre.app
 │
@@ -144,6 +145,36 @@ XLibre/
   pointer out, as X11 tools draw it from XFixes. Captures of one X window
   (Composite) are untouched. MIT-SHM has no shared pixmaps in Xnextbsd, so
   WebRTC reads with `ShmGetImage` rather than copying the root.
+- **HiDPI:** WindowServer lays the screen out in points, with a backing
+  scale of 1, 2 or 3 pixels per point (`WS_SERVER_SCALE`, "HiDPI" in
+  WindowServer's `WSProtocol.h`). Xnextbsd draws at that scale: its X
+  screen is the screen's size in points times the scale (a 3840 x 2160
+  panel that looks like 1920 x 1080 is a 3840 x 2160 X screen), each X
+  window's WindowServer frame is its X geometry divided by the scale
+  (rounded out to whole points; the buffer is padded with the window's
+  last column and row), its buffers carry the scale, pointer positions are
+  multiplied by it, and the usable area, RandR and the root window are in
+  pixels. RENDER cursors (themed, at `Xcursor.size`) carry the scale too;
+  core bitmap cursors are 1x and WindowServer scales them up. Xnextbsd puts
+  the scale on the root window as `_XNEXTBSD_SCALE`, and XLibre.app
+  (`XLScaleSettings`) tells X programs: `Xft.dpi` and `Xcursor.size` in
+  `RESOURCE_MANAGER` (and xterm's core font, `XTerm*font: 10x20`, at 2x
+  and more), XSETTINGS (`Gdk/WindowScalingFactor`, `Gdk/UnscaledDPI`,
+  `Xft/DPI`; XLibre.app owns `_XSETTINGS_S0`), and for the programs it
+  starts `GDK_SCALE`, `GDK_DPI_SCALE`, `QT_SCREEN_SCALE_FACTORS`,
+  `QT_ENABLE_HIGHDPI_SCALING` and `XCURSOR_SIZE`, chosen so that GTK,
+  Firefox, Qt and Xft programs come out exactly the scale's size, never
+  twice it (the reasoning is in `XLScaleSettings.m`). The window manager's
+  title bars and borders are drawn at the scale too. When the user picks
+  another "looks like" size the scale can change: X windows keep their
+  pixels, get new frames and buffers, title bars are laid out again and
+  the settings follow. The `XLibreLowResolution` default (Preferences:
+  "Open in low resolution", off by default) starts Xnextbsd with
+  `-lowres`: X draws at 1x, as XQuartz's programs do on a Retina display,
+  and WindowServer scales X windows up; everything above then says 1x. In
+  WindowServer's scaled "looks like" modes, WindowServer scales X windows
+  to the panel with everything else, and the root window's screen capture
+  is asked for at the X screen's size.
 - **The clipboard bridge and gpbs:** NSPasteboard. The bridge owns
   CLIPBOARD for the general pasteboard and PRIMARY for the "Selection"
   pasteboard, as xpbs does, and copies new X owners' data to them: text

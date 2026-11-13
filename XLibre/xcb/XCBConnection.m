@@ -806,8 +806,11 @@ static XCBConnection *sharedInstance;
     XCBRect area = [self placementArea];
     int left = area.position.x, top = area.position.y;
     int right = left + area.size.width, bottom = top + area.size.height;
-    int startX = MAX((int)self.placementX, left);
-    int startY = MAX((int)self.placementY, top);
+    // placementX, placementY and the step are points; X is in pixels
+    // (URSDecorationMetrics' scale).
+    int s = (int)[URSDecorationMetrics scale];
+    int startX = MAX((int)self.placementX * s, left);
+    int startY = MAX((int)self.placementY * s, top);
     int column, step, cx, px, py;
 
     // Top-left corners of the frames now on screen.
@@ -823,12 +826,12 @@ static XCBConnection *sharedInstance;
     }
 
     for (column = 0; ; column++) {
-        cx = startX + column * CASCADE_STEP * 8;
+        cx = startX + column * CASCADE_STEP * s * 8;
         if (column > 0 && (right <= left || cx + width > right))
             break;
         for (step = 0; ; step++) {
-            px = cx + step * CASCADE_STEP;
-            py = startY + step * CASCADE_STEP;
+            px = cx + step * CASCADE_STEP * s;
+            py = startY + step * CASCADE_STEP * s;
             if (step > 0 && (bottom <= top || py + height > bottom ||
                              px + width > right))
                 break;
@@ -1523,7 +1526,7 @@ static XCBConnection *sharedInstance;
     // When adopting pre-existing windows at startup, never reposition them.
     // Otherwise, reposition if the app hasn't explicitly specified a position.
     // Dialogs get centered (golden ratio) placement; other windows get a
-    // top-left offset (placementX, placementY: 22 and 44 px unless set).
+    // top-left offset (placementX, placementY: 22 and 44 points unless set).
     BOOL shouldReposition = NO;
     BOOL isDialog = NO;
 
