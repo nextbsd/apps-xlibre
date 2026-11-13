@@ -158,8 +158,8 @@ XLibre/
   core bitmap cursors are 1x and WindowServer scales them up. Xnextbsd puts
   the scale on the root window as `_XNEXTBSD_SCALE`, and XLibre.app
   (`XLScaleSettings`) tells X programs: `Xft.dpi` and `Xcursor.size` in
-  `RESOURCE_MANAGER` (and xterm's core font, `XTerm*font: 10x20`, at 2x
-  and more), XSETTINGS (`Gdk/WindowScalingFactor`, `Gdk/UnscaledDPI`,
+  `RESOURCE_MANAGER` (and an Xft face for xterm, `XTerm*faceName:
+  monospace` at 10 points, at 2x and more), XSETTINGS (`Gdk/WindowScalingFactor`, `Gdk/UnscaledDPI`,
   `Xft/DPI`; XLibre.app owns `_XSETTINGS_S0`), and for the programs it
   starts `GDK_SCALE`, `GDK_DPI_SCALE`, `QT_SCREEN_SCALE_FACTORS`,
   `QT_ENABLE_HIGHDPI_SCALING` and `XCURSOR_SIZE`, chosen so that GTK,

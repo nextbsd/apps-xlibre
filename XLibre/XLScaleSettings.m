@@ -40,8 +40,10 @@ NSString *const XLScaleDidChangeNotification = @"XLScaleDidChangeNotification";
 
 // xterm's font when X draws at 2x or more: xterm uses the core "fixed"
 // font (6x13) unless it is given an Xft face, and core fonts aren't
-// scaled. The largest of the misc fonts every X install has is 10x20.
-#define XL_XTERM_FONT "10x20"
+// scaled. An Xft face is, by Xft.dpi: a 10 point monospace face is as
+// large as at 1x and drawn sharp at the scale.
+#define XL_XTERM_FACE "monospace"
+#define XL_XTERM_FACE_SIZE "10"
 
 // XSETTINGS (freedesktop's XSETTINGS specification): setting types.
 #define XL_XSETTINGS_INT 0
@@ -106,7 +108,8 @@ NSString *const XLScaleDidChangeNotification = @"XLScaleDidChangeNotification";
 
     if (_scale > 1)
         lines = [lines stringByAppendingString:
-                           @"XTerm*font: " XL_XTERM_FONT "\n"];
+                           @"XTerm*faceName: " XL_XTERM_FACE "\n"
+                           @"XTerm*faceSize: " XL_XTERM_FACE_SIZE "\n"];
     return lines;
 }
 
@@ -130,7 +133,8 @@ NSString *const XLScaleDidChangeNotification = @"XLScaleDidChangeNotification";
 //  - Xlib and Xt programs (xterm with Xft fonts, Xaw, Motif): Xft.dpi in
 //    RESOURCE_MANAGER, 96 * s, so a 10 point font is s times as many
 //    pixels. Core bitmap fonts aren't scaled: at 2x and more xterm gets
-//    the larger 10x20 (XTerm*font) for its core font instead of 6x13.
+//    a 10 point monospace Xft face (XTerm*faceName, XTerm*faceSize)
+//    instead of its core 6x13.
 //  - Cursors: XCURSOR_SIZE (and Xcursor.size), 24 * s pixels, which
 //    Xnextbsd shows at the scale (24 points). GTK and Qt load them at
 //    that size without multiplying it again.
@@ -179,15 +183,22 @@ NSString *const XLScaleDidChangeNotification = @"XLScaleDidChangeNotification";
                 stringByTrimmingCharactersInSet:
                     [NSCharacterSet whitespaceCharacterSet]];
 
-        // Ours: Xft.dpi, Xcursor.size, and XTerm*font when it is the one
-        // we set (not someone else's).
+        NSString *value = colon.location == NSNotFound ? nil :
+            [[line substringFromIndex:colon.location + 1]
+                stringByTrimmingCharactersInSet:
+                    [NSCharacterSet whitespaceCharacterSet]];
+
+        // Ours: Xft.dpi, Xcursor.size, and xterm's face when it is the
+        // one we set (not someone else's); also the 10x20 core font
+        // earlier versions set.
         if ([line length] == 0 || [key isEqualToString:@"Xft.dpi"] ||
             [key isEqualToString:@"Xcursor.size"] ||
+            ([key isEqualToString:@"XTerm*faceName"] &&
+             [value isEqualToString:@XL_XTERM_FACE]) ||
+            ([key isEqualToString:@"XTerm*faceSize"] &&
+             [value isEqualToString:@XL_XTERM_FACE_SIZE]) ||
             ([key isEqualToString:@"XTerm*font"] &&
-             [[[line substringFromIndex:colon.location + 1]
-                 stringByTrimmingCharactersInSet:
-                     [NSCharacterSet whitespaceCharacterSet]]
-                 isEqualToString:@XL_XTERM_FONT]))
+             [value isEqualToString:@"10x20"]))
             continue;
         [res appendFormat:@"%@\n", line];
     }
