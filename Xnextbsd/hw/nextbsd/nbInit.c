@@ -262,6 +262,7 @@ nbBlockHandler(void *data, void *timeout)
     nbFramesUpdate();
     nbFocusCheck();
     nbUsableAreaPublish();
+    nbCaptureBlockHandler();
     if (ws_pending(nbScreenInfo.conn)) {
         nbInputDrain();
         AdjustWaitForDelay(timeout, 0);
@@ -321,6 +322,9 @@ nbScreenInit(ScreenPtr pScreen, int argc, char **argv)
     if (!nbFrameInit(pScreen))
         return FALSE;
     if (!nbCursorInit(pScreen))
+        return FALSE;
+    /* above rootless: reads of the root come from WindowServer */
+    if (!nbCaptureInit(pScreen))
         return FALSE;
     nbInputScreenInit(pScreen);
     if (!nbRandRInit(pScreen))

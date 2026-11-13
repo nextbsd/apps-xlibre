@@ -918,6 +918,15 @@ nbHandleEvent(ws_connection_t *conn, const ws_event_t *ev, void *context)
             nbFrameRestoreRequested(frame);
         break;
 
+#ifdef WS_SERVER_CAPTURE
+    case WS_EVENT_CAPTURE_STATE:
+    case WS_EVENT_CAPTURE_BUFFER:
+    case WS_EVENT_CAPTURE_FRAME:
+        /* the root window's capture stream (nbCapture.c) */
+        nbCaptureEvent(ev);
+        break;
+#endif
+
     default:
         break;
     }
