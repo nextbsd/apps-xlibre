@@ -181,6 +181,11 @@ void nbInputWaitForKeymap(void);
 /* nbCursor.c */
 Bool nbCursorInit(ScreenPtr pScreen);
 
+/* nbCapture.c: the root window reads WindowServer's screen capture */
+Bool nbCaptureInit(ScreenPtr pScreen);
+void nbCaptureEvent(const ws_event_t *ev);
+void nbCaptureBlockHandler(void);
+
 /* nbConfig.c: the keyboard settings WindowServer itself uses */
 typedef struct nbKeyboardConfig {
     char rules[64];

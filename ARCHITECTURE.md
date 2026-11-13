@@ -126,6 +126,24 @@ XLibre/
   windows that no longer fit just onto the screen, and Xnextbsd moves the
   X windows with them; the window manager then moves those frames into
   the usable area.
+- **Screen sharing:** X11 capture tools (Firefox's WebRTC, so Jitsi Meet
+  sharing "Entire screen"; recorders; `xwd -root`) read the root window with
+  `GetImage` or MIT-SHM's `ShmGetImage`, and may follow it with DAMAGE.
+  Xnextbsd is rootless, so nothing paints the root, and GNUstep apps, the
+  Dock and the desktop aren't in X at all. Xnextbsd (`nbCapture.c`) answers
+  reads of the root from WindowServer's screen capture instead
+  (apps-windowserver#49, "Screen capture" in `WSProtocol.h`): the real
+  screen, every app on it. It asks for a stream on behalf of the X client
+  that reads (`ws_capture_start_for` with the client's pid and command
+  name), so WindowServer's Screen Recording prompt names that program
+  ("firefox-esr"), not XLibre, and the user's answer is that program's.
+  Until the user allows it, and after a refusal or a Stop, the client reads
+  black. A stream runs only while a client reads the root (stopped after
+  15 s without a read) or has a Damage object on it, and its frames'
+  changed rectangles become DAMAGE events on the root. Frames leave the
+  pointer out, as X11 tools draw it from XFixes. Captures of one X window
+  (Composite) are untouched. MIT-SHM has no shared pixmaps in Xnextbsd, so
+  WebRTC reads with `ShmGetImage` rather than copying the root.
 - **The clipboard bridge and gpbs:** NSPasteboard. The bridge owns
   CLIPBOARD for the general pasteboard and PRIMARY for the "Selection"
   pasteboard, as xpbs does, and copies new X owners' data to them: text

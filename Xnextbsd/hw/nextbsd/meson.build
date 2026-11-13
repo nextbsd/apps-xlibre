@@ -1,4 +1,5 @@
 srcs = [
+    'nbCapture.c',
     'nbConfig.c',
     'nbCursor.c',
     'nbFrame.c',
