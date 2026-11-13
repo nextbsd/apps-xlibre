@@ -142,7 +142,16 @@ static BOOL pressedButtonHighlighted = NO;
                                                  bitsPerPixel:32];
 }
 
-// Draw a 1px outline on the given edges, as -[GSTheme drawWindowBorder:...] does
+// HiDPI: draw in points on a bitmap of X pixels, scale of them per point.
++ (void)scaleContext:(CGFloat)scale {
+    if (scale == 1)
+        return;
+    NSAffineTransform *t = [NSAffineTransform transform];
+    [t scaleBy:scale];
+    [t concat];
+}
+
+// Draw a 1pt outline on the given edges, as -[GSTheme drawWindowBorder:...] does
 + (void)strokeBorderForRect:(NSRect)r top:(BOOL)top bottom:(BOOL)bottom {
     [[URSDecorationMetrics borderColor] set];
     NSRectFill(NSMakeRect(0, 0, 1, r.size.height));
@@ -154,8 +163,10 @@ static BOOL pressedButtonHighlighted = NO;
 }
 
 // Outline the rounded corners of a decoration strip in the border colour.
+// r is in points, radius in pixels (URSDecorationMetrics).
 + (void)strokeRoundedCornersOfRect:(NSRect)r radius:(CGFloat)radius top:(BOOL)top
 {
+    radius /= [URSDecorationMetrics scale];
     if (radius <= 0)
         return;
 
@@ -373,12 +384,15 @@ static BOOL pressedButtonHighlighted = NO;
         if ([frame documentEdited] && [title hasPrefix:@"*"])
             title = [title substringFromIndex:1];
 
-        NSRect rect = NSMakeRect(0, 0, width, height);
-        NSBitmapImageRep *bitmap = [self newBitmapWithSize:rect.size];
+        // The bitmap is X pixels; the theme draws in points, scaled to them.
+        CGFloat scale = [URSDecorationMetrics scale];
+        NSRect rect = NSMakeRect(0, 0, width / scale, height / scale);
+        NSBitmapImageRep *bitmap = [self newBitmapWithSize:NSMakeSize(width, height)];
         NSGraphicsContext *ctx = [NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap];
 
         [NSGraphicsContext saveGraphicsState];
         [NSGraphicsContext setCurrentContext:ctx];
+        [self scaleContext:scale];
         [self drawTitleBarInRect:rect
                        styleMask:[frame decorationStyleMask]
                            state:isActive ? GSTitleBarKey : GSTitleBarNormal
@@ -424,12 +438,16 @@ static BOOL pressedButtonHighlighted = NO;
         }
 
         GSTheme *theme = [GSTheme theme];
-        NSRect rect = NSMakeRect(0, 0, barRect.size.width, barRect.size.height);
-        NSBitmapImageRep *bitmap = [self newBitmapWithSize:rect.size];
+        CGFloat scale = [URSDecorationMetrics scale];
+        NSRect rect = NSMakeRect(0, 0, barRect.size.width / scale,
+                                 barRect.size.height / scale);
+        NSBitmapImageRep *bitmap = [self newBitmapWithSize:
+            NSMakeSize(barRect.size.width, barRect.size.height)];
         NSGraphicsContext *ctx = [NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap];
 
         [NSGraphicsContext saveGraphicsState];
         [NSGraphicsContext setCurrentContext:ctx];
+        [self scaleContext:scale];
         [[URSDecorationMetrics borderColor] set];
         NSRectFill(rect);
         if ([theme respondsToSelector:@selector(drawResizeBarRect:)]) {

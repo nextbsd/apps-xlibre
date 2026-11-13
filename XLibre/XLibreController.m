@@ -11,6 +11,7 @@
 #import "XLibreController.h"
 #import "XLServer.h"
 #import "XLPasteboardBridge.h"
+#import "XLScaleSettings.h"
 #import "URSHybridEventHandler.h"
 
 #import <GNUstepGUI/GSDisplayServer.h>
@@ -29,11 +30,13 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
     XLServer *_server;
     URSHybridEventHandler *_wm;
     XLPasteboardBridge *_clipboard;
+    XLScaleSettings *_scale;
     NSTimer *_watchdog;
     BOOL _serverGone;
     NSPanel *_prefs;
     NSTextField *_prefsAppToRun;
     NSButton *_prefsSelectToClipboard;
+    NSButton *_prefsLowResolution;
     NSMutableArray *_openedPrograms;
 }
 
@@ -49,6 +52,10 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
         // xterm's selections go to CLIPBOARD (the general pasteboard, so
         // Command-V pastes them in GNUstep apps) as well as PRIMARY.
         @"XLibreSelectToClipboard": @YES,
+        // On a HiDPI screen X programs draw at its scale (sharp); YES makes
+        // them draw at 1x and WindowServer scale them up, as XQuartz's are
+        // on a Retina display (macOS's "Open in Low Resolution").
+        @"XLibreLowResolution": @NO,
     }];
 }
 
@@ -173,6 +180,12 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
     setenv("DISPLAY", [[_server display] UTF8String], 1);
     setenv("XAUTHORITY", [[_server authority] fileSystemRepresentation], 1);
 
+    // The scale X draws at, before the window manager lays out title bars
+    // and before any X program starts.
+    _scale = [[XLScaleSettings alloc] init];
+    if (![_scale start])
+        _scale = nil;
+
     // Load the theme now: title bars drawn before it activates would use
     // GNUstep's default one until the next redraw.
     [GSTheme theme];
@@ -236,6 +249,21 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
         [res appendString:@"XTerm*selectToClipboard: true\n"];
     if ([d stringForKey:@"XLibreXResources"] != nil)
         [res appendString:[d stringForKey:@"XLibreXResources"]];
+    // Xft.dpi and Xcursor.size for the scale (XLScaleSettings), unless
+    // XLibreXResources sets them.
+    if (_scale != nil) {
+        if ([res length] > 0 && ![res hasSuffix:@"\n"])
+            [res appendString:@"\n"];
+        for (NSString *line in [[_scale resourceLines]
+                                   componentsSeparatedByString:@"\n"]) {
+            NSRange colon = [line rangeOfString:@":"];
+
+            if (colon.location != NSNotFound &&
+                [res rangeOfString:[line substringToIndex:colon.location + 1]]
+                    .location == NSNotFound)
+                [res appendFormat:@"%@\n", line];
+        }
+    }
     data = [res dataUsingEncoding:NSUTF8StringEncoding];
     if ([data length] == 0)
         xcb_delete_property(c, screen->root, XCB_ATOM_RESOURCE_MANAGER);
@@ -281,13 +309,16 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
 
 #pragma mark - X programs
 
-// Our environment, which NSProcessInfo took at startup, plus DISPLAY and
-// XAUTHORITY.
+// Our environment, which NSProcessInfo took at startup, plus DISPLAY,
+// XAUTHORITY and the toolkits' scale variables for the scale X draws at now
+// (XLScaleSettings).
 - (NSDictionary *)clientEnvironment
 {
     NSMutableDictionary *env = [[[NSProcessInfo processInfo] environment]
                                    mutableCopy];
 
+    if (_scale != nil)
+        [env addEntriesFromDictionary:[_scale environment]];
     [env setObject:[_server display] forKey:@"DISPLAY"];
     [env setObject:[_server authority] forKey:@"XAUTHORITY"];
     [env removeObjectForKey:@"XNEXTBSD_JOIN"];
@@ -396,7 +427,7 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
         NSView *view;
 
         _prefs = [[NSPanel alloc]
-            initWithContentRect:NSMakeRect(0, 0, 420, 160)
+            initWithContentRect:NSMakeRect(0, 0, 420, 228)
                       styleMask:NSTitledWindowMask | NSClosableWindowMask
                         backing:NSBackingStoreBuffered
                           defer:YES];
@@ -405,7 +436,7 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
         [_prefs setDelegate:(id)self];
         view = [_prefs contentView];
 
-        label = [[NSTextField alloc] initWithFrame:NSMakeRect(16, 118, 388, 20)];
+        label = [[NSTextField alloc] initWithFrame:NSMakeRect(16, 186, 388, 20)];
         [label setStringValue:@"Run when XLibre starts:"];
         [label setEditable:NO];
         [label setSelectable:NO];
@@ -414,12 +445,12 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
         [view addSubview:label];
 
         _prefsAppToRun = [[NSTextField alloc]
-                             initWithFrame:NSMakeRect(16, 90, 388, 24)];
+                             initWithFrame:NSMakeRect(16, 158, 388, 24)];
         [_prefsAppToRun setTarget:self];
         [_prefsAppToRun setAction:@selector(appToRunChanged:)];
         [view addSubview:_prefsAppToRun];
 
-        note = [[NSTextField alloc] initWithFrame:NSMakeRect(16, 52, 388, 32)];
+        note = [[NSTextField alloc] initWithFrame:NSMakeRect(16, 120, 388, 32)];
         [note setStringValue:@"Leave empty to start nothing. More programs "
               "for the Applications menu: the XLibreApplications default."];
         [note setEditable:NO];
@@ -430,13 +461,32 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
         [view addSubview:note];
 
         _prefsSelectToClipboard = [[NSButton alloc]
-                                      initWithFrame:NSMakeRect(16, 16, 388, 22)];
+                                      initWithFrame:NSMakeRect(16, 84, 388, 22)];
         [_prefsSelectToClipboard setButtonType:NSSwitchButton];
         [_prefsSelectToClipboard setTitle:
             @"Copy xterm selections to the clipboard"];
         [_prefsSelectToClipboard setTarget:self];
         [_prefsSelectToClipboard setAction:@selector(selectToClipboardChanged:)];
         [view addSubview:_prefsSelectToClipboard];
+
+        _prefsLowResolution = [[NSButton alloc]
+                                  initWithFrame:NSMakeRect(16, 56, 388, 22)];
+        [_prefsLowResolution setButtonType:NSSwitchButton];
+        [_prefsLowResolution setTitle:@"Open in low resolution"];
+        [_prefsLowResolution setTarget:self];
+        [_prefsLowResolution setAction:@selector(lowResolutionChanged:)];
+        [view addSubview:_prefsLowResolution];
+
+        note = [[NSTextField alloc] initWithFrame:NSMakeRect(34, 14, 370, 40)];
+        [note setStringValue:@"On a HiDPI display, X11 programs draw at 1x "
+              "and are scaled up, as in XQuartz. Takes effect the next time "
+              "XLibre starts."];
+        [note setEditable:NO];
+        [note setSelectable:NO];
+        [note setBezeled:NO];
+        [note setDrawsBackground:NO];
+        [note setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+        [view addSubview:note];
         [_prefs center];
     }
     [_prefsAppToRun setStringValue:[[NSUserDefaults standardUserDefaults]
@@ -444,6 +494,9 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
     [_prefsSelectToClipboard setState:
         [[NSUserDefaults standardUserDefaults]
             boolForKey:@"XLibreSelectToClipboard"] ? NSOnState : NSOffState];
+    [_prefsLowResolution setState:
+        [[NSUserDefaults standardUserDefaults]
+            boolForKey:@"XLibreLowResolution"] ? NSOnState : NSOffState];
     [_prefs makeKeyAndOrderFront:nil];
     [_prefs makeFirstResponder:_prefsAppToRun];
 }
@@ -463,6 +516,15 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
          forKey:@"XLibreSelectToClipboard"];
     [[NSUserDefaults standardUserDefaults] synchronize];
     [self loadResources];
+}
+
+// The X server is started with -lowres or without it: the next time.
+- (void)lowResolutionChanged:(id)sender
+{
+    [[NSUserDefaults standardUserDefaults]
+        setBool:[_prefsLowResolution state] == NSOnState
+         forKey:@"XLibreLowResolution"];
+    [[NSUserDefaults standardUserDefaults] synchronize];
 }
 
 - (void)windowWillClose:(NSNotification *)n
@@ -529,6 +591,8 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
     _watchdog = nil;
     [_clipboard stop];
     _clipboard = nil;
+    [_scale stop];
+    _scale = nil;
     [_server stop];
 }
 

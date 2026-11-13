@@ -16,24 +16,36 @@
 
 @implementation URSDecorationMetrics
 
+static NSUInteger decorationScale = 1;
+
++ (NSUInteger)scale
+{
+    return decorationScale;
+}
+
++ (void)setScale:(NSUInteger)scale
+{
+    decorationScale = scale >= 1 && scale <= 4 ? scale : 1;
+}
+
 + (uint16_t)titlebarHeight
 {
-    return (uint16_t)lround([[GSTheme theme] titlebarHeight]);
+    return (uint16_t)lround([[GSTheme theme] titlebarHeight] * decorationScale);
 }
 
 + (uint16_t)resizebarHeight
 {
-    return (uint16_t)lround([[GSTheme theme] resizebarHeight]);
+    return (uint16_t)lround([[GSTheme theme] resizebarHeight] * decorationScale);
 }
 
 + (uint16_t)resizebarNotchWidth
 {
-    return (uint16_t)lround([[GSTheme theme] resizebarNotchWidth]);
+    return (uint16_t)lround([[GSTheme theme] resizebarNotchWidth] * decorationScale);
 }
 
 + (uint16_t)borderWidth
 {
-    return 1;
+    return (uint16_t)decorationScale;
 }
 
 + (BOOL)hasTitleBarForStyleMask:(NSUInteger)styleMask
@@ -143,7 +155,10 @@
                  titleBarSize:(NSSize)size
                     styleMask:(NSUInteger)styleMask
 {
-    NSPoint p = NSMakePoint(point.x, size.height - point.y);
+    // The theme's button frames are points.
+    CGFloat s = (CGFloat)decorationScale;
+    NSPoint p = NSMakePoint(point.x / s, (size.height - point.y) / s);
+    size = NSMakeSize(size.width / s, size.height / s);
     for (NSNumber *b in [self buttonsForStyleMask:styleMask]) {
         NSWindowButton button = (NSWindowButton)[b integerValue];
         NSRect frame = [self frameForButton:button titleBarSize:size styleMask:styleMask];
@@ -181,7 +196,7 @@
     if (![self hasTitleBarForStyleMask:styleMask] ||
         ![theme respondsToSelector:@selector(titlebarCornerRadius)])
         return 0;
-    long radius = lround([theme titlebarCornerRadius]);
+    long radius = lround([theme titlebarCornerRadius] * decorationScale);
     return (uint16_t)MAX(0, MIN(radius, (long)[self titlebarHeight]));
 }
 
@@ -191,7 +206,7 @@
     if (![self hasResizeBarForStyleMask:styleMask] ||
         ![theme respondsToSelector:@selector(windowBottomCornerRadius)])
         return 0;
-    long radius = lround([theme windowBottomCornerRadius]);
+    long radius = lround([theme windowBottomCornerRadius] * decorationScale);
     return (uint16_t)MAX(0, MIN(radius, (long)[self resizebarHeight]));
 }
 

@@ -43,6 +43,14 @@
  * Warps (XWarpPointer) move WindowServer's pointer too, which it allows
  * while we are the active app and the pointer is over one of our frames
  * or grabbed by us (WS_SERVER_POINTER_WARP).
+ *
+ * HiDPI: hot spots are points on WindowServer. RENDER (ARGB) cursors are
+ * the ones X programs load from cursor themes at Xcursor.size, which
+ * XLibre.app makes 24 times the scale, so their buffers carry the scale
+ * X draws at and show pixel for pixel. Their image is moved right and
+ * down by up to scale - 1 pixels so that the hot spot is on a whole
+ * point. Core (bitmap) cursors are made for 1x screens: their buffers
+ * are 1x, and WindowServer scales them up to the size they have on one.
  */
 
 #include <dix-config.h>
@@ -68,6 +76,7 @@ typedef struct nbCursorBuf {
     struct xorg_list link;
     CursorPtr cursor;
     ws_buffer_t *buffer;
+    int hot_x, hot_y;           /* in points */
 } nbCursorBuf;
 
 static struct xorg_list nbCursorImages;
@@ -83,13 +92,13 @@ nbCursorPixel(unsigned short r, unsigned short g, unsigned short b)
         (uint32_t) (g >> 8) << 8 | (uint32_t) (b >> 8);
 }
 
-/* Fill a WindowServer buffer with the cursor's image. */
+/* Fill a WindowServer buffer with the cursor's image, at dx, dy. */
 static void
-nbCursorImage(CursorPtr pCursor, ws_buffer_t *buffer)
+nbCursorImage(CursorPtr pCursor, ws_buffer_t *buffer, int dx, int dy)
 {
     CursorBitsPtr bits = pCursor->bits;
-    uint32_t *dst = ws_buffer_data(buffer);
     uint32_t stride = ws_buffer_stride(buffer) / 4;
+    uint32_t *dst = (uint32_t *) ws_buffer_data(buffer) + dy * stride + dx;
     uint32_t fg, bg;
     int x, y;
 
@@ -124,30 +133,42 @@ nbCursorImage(CursorPtr pCursor, ws_buffer_t *buffer)
     }
 }
 
-/* The buffer holding pCursor's image, made the first time it is shown. */
-static ws_buffer_t *
+/*
+ * The buffer holding pCursor's image, made the first time it is shown,
+ * and its hot spot in points.
+ */
+static nbCursorBuf *
 nbCursorBuffer(CursorPtr pCursor)
 {
+    CursorBitsPtr bits = pCursor->bits;
     nbCursorBuf *ci;
+    int s, dx, dy, w, h;
 
     xorg_list_for_each_entry(ci, &nbCursorImages, link)
         if (ci->cursor == pCursor)
-            return ci->buffer;
+            return ci;
     ci = calloc(1, sizeof(*ci));
     if (ci == NULL)
         return NULL;
-    ci->buffer = ws_buffer_create(nbConnection(), pCursor->bits->width,
-                                  pCursor->bits->height, 1);
+    s = bits->argb != NULL ? (int) nbScreenInfo.scale : 1;
+    /* the hot spot on a whole point, the size whole points */
+    dx = (s - bits->xhot % s) % s;
+    dy = (s - bits->yhot % s) % s;
+    w = (bits->width + dx + s - 1) / s * s;
+    h = (bits->height + dy + s - 1) / s * s;
+    ci->buffer = ws_buffer_create(nbConnection(), w ? w : s, h ? h : s, s);
     if (ci->buffer == NULL) {
         ErrorF("Xnextbsd: can't make a cursor buffer: %s\n",
                strerror(errno));
         free(ci);
         return NULL;
     }
-    nbCursorImage(pCursor, ci->buffer);
+    nbCursorImage(pCursor, ci->buffer, dx, dy);
+    ci->hot_x = (bits->xhot + dx) / s;
+    ci->hot_y = (bits->yhot + dy) / s;
     ci->cursor = pCursor;
     xorg_list_add(&ci->link, &nbCursorImages);
-    return ci->buffer;
+    return ci;
 }
 
 /* Drop a cursor's buffer (WindowServer keeps its own references). */
@@ -175,7 +196,7 @@ nbCursorFrame(DeviceIntPtr pDev)
 static void
 nbCursorShow(DeviceIntPtr pDev, CursorPtr pCursor)
 {
-    ws_buffer_t *buffer;
+    nbCursorBuf *ci;
     nbFrame *frame = NULL;
     int r;
 
@@ -198,16 +219,16 @@ nbCursorShow(DeviceIntPtr pDev, CursorPtr pCursor)
     if (frame != NULL ? frame->cursor == pCursor : pCursor == nbCursorShown)
         return;
 
-    buffer = nbCursorBuffer(pCursor);
-    if (buffer == NULL)
+    ci = nbCursorBuffer(pCursor);
+    if (ci == NULL)
         return;
     if (frame != NULL)
         r = ws_window_set_cursor(nbConnection(), frame->wid,
-                                 WS_CURSOR_CUSTOM, buffer,
-                                 pCursor->bits->xhot, pCursor->bits->yhot);
+                                 WS_CURSOR_CUSTOM, ci->buffer,
+                                 ci->hot_x, ci->hot_y);
     else
-        r = ws_set_cursor(nbConnection(), WS_CURSOR_CUSTOM, buffer,
-                          pCursor->bits->xhot, pCursor->bits->yhot);
+        r = ws_set_cursor(nbConnection(), WS_CURSOR_CUSTOM, ci->buffer,
+                          ci->hot_x, ci->hot_y);
     if (r < 0) {
         nbWindowServerLost("cursor");
         return;
@@ -306,7 +327,9 @@ nbWarpCursor(DeviceIntPtr pDev, ScreenPtr pScreen, int x, int y)
         !nbScreenInfo.active ||
         (nbScreenInfo.pointer_frame == NULL && !nbScreenInfo.ws_grab))
         return;
-    if (ws_warp_pointer(nbConnection(), 0, x, y) < 0)
+    /* X's pixels, in WindowServer's points */
+    if (ws_warp_pointer(nbConnection(), 0, (double) x / nbScreenInfo.scale,
+                        (double) y / nbScreenInfo.scale) < 0)
         nbWindowServerLost("warp");
 }
 
@@ -321,11 +344,36 @@ nbCursorQueryBestSize(int class, unsigned short *width,
                       unsigned short *height, ScreenPtr pScreen)
 {
     if (class == CursorShape) {
-        *width = 64;
-        *height = 64;
+        *width = 64 * nbScreenInfo.scale;
+        *height = 64 * nbScreenInfo.scale;
     } else {
         fbQueryBestSize(class, width, height, pScreen);
     }
+}
+
+/*
+ * The scale X draws at changed: the cursors' buffers are made again at
+ * it when next shown, and the one shown now is sent again.
+ */
+void
+nbCursorRescale(void)
+{
+    nbCursorBuf *ci, *tmp;
+    nbFrame *frame;
+    DeviceIntPtr pDev = inputInfo.pointer;
+    CursorPtr shown = nbCursorShown;
+
+    xorg_list_for_each_entry_safe(ci, tmp, &nbCursorImages, link)
+        nbCursorForget(ci);
+    nbCursorShown = NULL;
+    xorg_list_for_each_entry(frame, &nbScreenInfo.frames, link)
+        frame->cursor = NULL;
+    if (pDev != NULL && pDev->spriteInfo != NULL &&
+        pDev->spriteInfo->sprite != NULL &&
+        pDev->spriteInfo->sprite->current != NULL)
+        shown = pDev->spriteInfo->sprite->current;
+    if (shown != NULL && !nbCursorHidden)
+        nbCursorShow(pDev, shown);
 }
 
 Bool

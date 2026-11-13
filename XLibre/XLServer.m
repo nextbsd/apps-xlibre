@@ -236,6 +236,11 @@ serverEnvironment(NSDictionary *credentials)
     args = [NSMutableArray arrayWithObjects:server,
             @"-displayfd", [NSString stringWithFormat:@"%d", XL_DISPLAYFD],
             @"-nolisten", @"tcp", @"-auth", _serverAuth, nil];
+    // XLibreLowResolution: X draws at 1x on a HiDPI display, and
+    // WindowServer scales it up.
+    if ([[NSUserDefaults standardUserDefaults]
+            boolForKey:@"XLibreLowResolution"])
+        [args addObject:@"-lowres"];
     for (id a in [[NSUserDefaults standardUserDefaults]
                     arrayForKey:@"XLibreServerArguments"])
         if ([a isKindOfClass:[NSString class]])

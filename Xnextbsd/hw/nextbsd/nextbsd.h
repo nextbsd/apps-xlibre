@@ -40,12 +40,22 @@
 #include "cursor.h"
 
 /*
+ * HiDPI (WindowServer's WSProtocol.h "HiDPI"): WindowServers that have
+ * it say so with WS_SERVER_SCALE; older headers don't name the flag.
+ */
+#ifndef WS_SERVER_SCALE
+#define WS_SERVER_SCALE 0x10000000
+#endif
+
+/*
  * A WindowServer buffer of a frame. WindowServer reads it while it is
  * attached (and until it hands it back), so X only writes to one it
  * doesn't hold.
  */
 typedef struct nbBuffer {
     ws_buffer_t *ws;            /* NULL until first needed */
+    unsigned int width, height; /* its pixels: the frame's, rounded up to
+                                   whole points */
     Bool busy;                  /* attached, or not handed back yet */
     RegionRec stale;            /* frame-local: where it lags the backing */
 } nbBuffer;
@@ -64,8 +74,10 @@ typedef struct nbFrame {
     nbBuffer buffers[NB_NBUFFERS];
     Bool frame_pending;         /* committed, WS_EVENT_FRAME_DONE not in */
     Bool commit_wanted;         /* damage waits for FRAME_DONE or a buffer */
-    int x, y;                   /* screen position, border included */
-    unsigned int width, height;
+    int x, y;                   /* screen position, border included, in
+                                   X pixels */
+    unsigned int width, height; /* X pixels */
+    unsigned int scale;         /* pixels per point of its buffers */
     int32_t level;              /* WS_LEVEL_* */
     uint32_t flags;             /* WS_WINDOW_* */
     uint32_t format;            /* WS_FORMAT_* of the buffer */
@@ -92,11 +104,19 @@ typedef struct nbScreen {
     size_t keymap_len;
     int repeat_delay;           /* from the keymap event, ms */
     int repeat_interval;        /* 0: no key repeat */
-    int width, height;
+    int width, height;          /* the X screen, in pixels: WindowServer's
+                                   points times scale */
+    unsigned int scale;         /* X pixels per WindowServer point: 1, or
+                                   WindowServer's backing scale */
+    unsigned int ws_scale;      /* WindowServer's backing scale (1 without
+                                   WS_SERVER_SCALE) */
+    Bool lowres;                /* -lowres: X draws at 1x and WindowServer
+                                   scales it up, as XQuartz's apps are */
+    Bool scale_dirty;           /* NB_SCALE_ATOM not on the root yet */
     int mm_width, mm_height;
     unsigned int refresh_mhz;   /* WindowServer's refresh rate, 0 if unknown */
     char screen_name[32];       /* WindowServer's name for the screen */
-    ws_rect_t usable;           /* WindowServer's usable area */
+    ws_rect_t usable;           /* WindowServer's usable area, in points */
     Bool usable_dirty;          /* not on the root window yet */
     struct xorg_list frames;
     Bool active;                /* we are WindowServer's active app */
@@ -131,6 +151,7 @@ void nbFrameBufferReleased(nbFrame *frame, uint32_t buffer_id);
 void nbFrameSetByWindowServer(nbFrame *frame, const ws_rect_t *r);
 void nbFrameRestoreRequested(nbFrame *frame);
 void nbFramesUpdate(void);
+void nbFramesRescale(void);
 nbFrame *nbFrameOfWindow(WindowPtr pWin);
 
 /*
@@ -165,6 +186,61 @@ nbFrame *nbFrameOfWindow(WindowPtr pWin);
 #define NB_MINIMIZED_ATOM "_XNEXTBSD_MINIMIZED"
 #define NB_RESTORE_ATOM "_XNEXTBSD_RESTORE"
 
+/*
+ * The scale X draws at, set by the server on the root window:
+ * _XNEXTBSD_SCALE (CARDINAL/32) is the number of X pixels per WindowServer
+ * point, 1 on ordinary screens and in -lowres mode, 2 or 3 on HiDPI ones.
+ * XLibre.app follows it: Xft.dpi and Xcursor.size in RESOURCE_MANAGER,
+ * XSETTINGS, the window manager's title bars and the environment of the
+ * X programs it starts.
+ */
+#define NB_SCALE_ATOM "_XNEXTBSD_SCALE"
+
+/*
+ * Points and pixels. WindowServer's coordinates are points; X's are
+ * pixels, nbScreenInfo.scale of them per point. A frame's buffer holds
+ * its pixels from its top-left corner, padded to whole points (the last
+ * column and row are repeated into the padding, nbBufferUpdate), and
+ * WindowServer shows it at the point the frame's origin is in: a frame at
+ * an odd place on a 2x screen shows up to scale - 1 pixels up and left of
+ * where X has it, and one of an odd size half a point larger. Pointer
+ * events go by the place in the window (nbInput.c), so a click lands on
+ * the pixel under the pointer either way.
+ */
+static inline int
+nbPixelsToPointsDown(int px)
+{
+    int s = (int) nbScreenInfo.scale;
+
+    return px >= 0 ? px / s : -((-px + s - 1) / s);
+}
+
+static inline int
+nbPixelsToPointsUp(int px)
+{
+    int s = (int) nbScreenInfo.scale;
+
+    return px >= 0 ? (px + s - 1) / s : -(-px / s);
+}
+
+/* A frame at x, y of w x h X pixels, in points. */
+static inline ws_rect_t
+nbPixelFrameToPoints(int x, int y, unsigned int w, unsigned int h)
+{
+    ws_rect_t r;
+
+    r.x = nbPixelsToPointsDown(x);
+    r.y = nbPixelsToPointsDown(y);
+    r.width = nbPixelsToPointsUp((int) w);
+    r.height = nbPixelsToPointsUp((int) h);
+    return r;
+}
+
+/* nbInit.c */
+unsigned int nbBackingScale(const ws_screen_info_t *si);
+unsigned int nbDrawScale(const ws_screen_info_t *si);
+void nbScalePublish(void);
+
 /* nbRandR.c */
 Bool nbRandRInit(ScreenPtr pScreen);
 void nbScreenChanged(const ws_screen_info_t *si);
@@ -180,6 +256,7 @@ void nbInputWaitForKeymap(void);
 
 /* nbCursor.c */
 Bool nbCursorInit(ScreenPtr pScreen);
+void nbCursorRescale(void);
 
 /* nbCapture.c: the root window reads WindowServer's screen capture */
 Bool nbCaptureInit(ScreenPtr pScreen);

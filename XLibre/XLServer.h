@@ -7,12 +7,13 @@
 //
 //  Starts Xnextbsd from the app bundle (Resources/Xnextbsd) as
 //
-//    Xnextbsd -displayfd 3 -nolisten tcp -auth <server auth file>
+//    Xnextbsd -displayfd 3 -nolisten tcp -auth <server auth file> [-lowres]
 //
-//  with a fresh MIT-MAGIC-COOKIE-1 made with xauth. The server picks a free
-//  display and writes its number to fd 3; the cookie then goes into the
-//  user's Xauthority for that display, and X clients get DISPLAY and
-//  XAUTHORITY. WindowServer credentials, when given, reach the server in
+//  (-lowres with the XLibreLowResolution default: X draws at 1x on a
+//  HiDPI display) with a fresh MIT-MAGIC-COOKIE-1 made with xauth. The
+//  server picks a free display and writes its number to fd 3; the cookie
+//  then goes into the user's Xauthority for that display, and X clients
+//  get DISPLAY and XAUTHORITY. WindowServer credentials, when given, reach the server in
 //  its environment (XNEXTBSD_JOIN), never on its command line, so it joins
 //  XLibre.app's WindowServer app.
 //

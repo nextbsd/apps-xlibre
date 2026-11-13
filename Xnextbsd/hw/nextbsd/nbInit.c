@@ -45,9 +45,11 @@
 #include <string.h>
 
 #include <X11/X.h>
+#include <X11/Xatom.h>
 #include <X11/Xproto.h>
 
 #include "dix/dix_priv.h"
+#include "dix/property_priv.h"
 #include "dix/screenint_priv.h"
 #include "include/extinit.h"
 #include "mi/mi_priv.h"
@@ -142,6 +144,54 @@ nbConnectJoin(uint32_t flags)
     return conn;
 }
 
+/*
+ * WindowServer's backing scale, from a screen it reports: 1 unless it
+ * has WS_SERVER_SCALE. Anything but 1 to 4 is taken as 1.
+ */
+unsigned int
+nbBackingScale(const ws_screen_info_t *si)
+{
+    if (!(nbScreenInfo.server_flags & WS_SERVER_SCALE) || si == NULL ||
+        si->scale < 1 || si->scale > 4)
+        return 1;
+    return si->scale;
+}
+
+/*
+ * The scale X draws at: WindowServer's backing scale, so X windows are
+ * as sharp as everything else on a HiDPI screen; 1 with -lowres, where
+ * WindowServer scales X windows up as XQuartz's are on a Retina display.
+ */
+unsigned int
+nbDrawScale(const ws_screen_info_t *si)
+{
+    return nbScreenInfo.lowres ? 1 : nbBackingScale(si);
+}
+
+/*
+ * Put the scale X draws at on the root window (NB_SCALE_ATOM), once
+ * there is a root window and whenever it changes, for XLibre.app.
+ */
+void
+nbScalePublish(void)
+{
+    ScreenPtr pScreen = screenInfo.screens[0];
+    CARD32 value;
+    Atom atom;
+
+    if (!nbScreenInfo.scale_dirty || pScreen == NULL ||
+        pScreen->root == NULL)
+        return;
+    atom = MakeAtom(NB_SCALE_ATOM, strlen(NB_SCALE_ATOM), TRUE);
+    if (atom == None)
+        return;
+    value = nbScreenInfo.scale;
+    if (dixChangeWindowProperty(serverClient, pScreen->root, atom,
+                                XA_CARDINAL, 32, PropModeReplace, 1, &value,
+                                TRUE) == Success)
+        nbScreenInfo.scale_dirty = FALSE;
+}
+
 static void
 nbConnect(void)
 {
@@ -168,15 +218,19 @@ nbConnect(void)
     si = ws_main_screen(nbScreenInfo.conn);
     if (si == NULL || si->width == 0 || si->height == 0)
         FatalError("Xnextbsd: WindowServer reported no screen\n");
-    nbScreenInfo.width = si->width;
-    nbScreenInfo.height = si->height;
+    nbScreenInfo.server_flags = ws_server_flags(nbScreenInfo.conn);
+    /* WindowServer's screen is in points; X's is in pixels. */
+    nbScreenInfo.ws_scale = nbBackingScale(si);
+    nbScreenInfo.scale = nbDrawScale(si);
+    nbScreenInfo.scale_dirty = TRUE;
+    nbScreenInfo.width = si->width * nbScreenInfo.scale;
+    nbScreenInfo.height = si->height * nbScreenInfo.scale;
     nbScreenInfo.mm_width = si->mm_width;
     nbScreenInfo.mm_height = si->mm_height;
     nbScreenInfo.refresh_mhz = si->refresh_mhz;
     snprintf(nbScreenInfo.screen_name, sizeof(nbScreenInfo.screen_name),
              "%.*s", (int) sizeof(si->name), si->name);
     xorg_list_init(&nbScreenInfo.frames);
-    nbScreenInfo.server_flags = ws_server_flags(nbScreenInfo.conn);
 
     /* Put on the root window once there is one (nbBlockHandler). */
     {
@@ -191,10 +245,16 @@ nbConnect(void)
     }
 
     LogMessageVerb(X_INFO, 0, "Xnextbsd: connected to WindowServer as "
-                   "client %u (app %u), screen %ux%u, server flags 0x%x\n",
+                   "client %u (app %u), screen %ux%u points at %ux, "
+                   "server flags 0x%x\n",
                    ws_client_id(nbScreenInfo.conn),
                    ws_app_id(nbScreenInfo.conn), si->width, si->height,
-                   nbScreenInfo.server_flags);
+                   nbScreenInfo.ws_scale, nbScreenInfo.server_flags);
+    LogMessageVerb(X_INFO, 0, "Xnextbsd: the X screen is %dx%d pixels, %u "
+                   "per point%s\n", nbScreenInfo.width, nbScreenInfo.height,
+                   nbScreenInfo.scale, nbScreenInfo.lowres &&
+                   nbScreenInfo.ws_scale > 1 ? " (-lowres: WindowServer "
+                   "scales X windows up)" : "");
 
     if (nbScreenInfo.server_flags & WS_SERVER_XKB)
         nbInputWaitForKeymap();
@@ -237,12 +297,22 @@ ddxUseMsg(void)
            "the screen size comes from WindowServer, and the keyboard "
            "layout from WindowServer's\n"
            "KeyboardRules, KeyboardModel, KeyboardLayout, KeyboardVariant "
-           "and KeyboardOptions settings.\n");
+           "and KeyboardOptions settings.\n"
+           "On a HiDPI screen X draws at WindowServer's backing scale (the "
+           "X screen is its size\n"
+           "in points times the scale, and _XNEXTBSD_SCALE on the root "
+           "window says the scale).\n"
+           "-lowres                draw at 1x instead and let WindowServer "
+           "scale X windows up\n");
 }
 
 int
 ddxProcessArgument(int argc, char *argv[], int i)
 {
+    if (strcmp(argv[i], "-lowres") == 0) {
+        nbScreenInfo.lowres = TRUE;
+        return 1;
+    }
     return 0;
 }
 
@@ -262,6 +332,7 @@ nbBlockHandler(void *data, void *timeout)
     nbFramesUpdate();
     nbFocusCheck();
     nbUsableAreaPublish();
+    nbScalePublish();
     nbCaptureBlockHandler();
     if (ws_pending(nbScreenInfo.conn)) {
         nbInputDrain();
@@ -296,7 +367,8 @@ nbScreenInit(ScreenPtr pScreen, int argc, char **argv)
     if (monitorResolution) {
         dpix = dpiy = monitorResolution;
     } else {
-        dpix = dpiy = 96;
+        /* 96 dpi per point when WindowServer doesn't know the size */
+        dpix = dpiy = 96 * nbScreenInfo.scale;
         if (nbScreenInfo.mm_width > 0)
             dpix = (int) (nbScreenInfo.width * 25.4 /
                           nbScreenInfo.mm_width + 0.5);
