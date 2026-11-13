@@ -133,13 +133,6 @@ nbFrameWindow(nbFrame *frame)
     return frame != NULL && frame->rwin != NULL ? frame->rwin->win : NULL;
 }
 
-/* The frame in WindowServer's points. */
-static ws_rect_t
-nbFramePoints(int x, int y, unsigned int w, unsigned int h)
-{
-    return nbPixelFrameToPoints(x, y, w, h);
-}
-
 /*
  * A buffer for a frame of width x height X pixels: at least one point,
  * padded to whole points (WindowServer refuses empty ones), with the
@@ -746,7 +739,7 @@ nbCreateFrame(RootlessWindowPtr pFrame, ScreenPtr pScreen, int newX,
     nbFrameStyle(pWin, frame->shaped, &frame->level, &frame->flags,
                  &frame->format);
 
-    r = nbFramePoints(newX, newY, frame->width, frame->height);
+    r = nbPixelFrameToPoints(newX, newY, frame->width, frame->height);
     snprintf(title, sizeof(title), "X11 0x%x", (unsigned) pWin->drawable.id);
     /* No round trip on a WindowServer with WS_SERVER_WINDOW_IDS. */
     frame->wid = ws_window_create_nowait(nbConnection(), &r, frame->level,
@@ -819,7 +812,7 @@ nbMoveFrame(RootlessFrameID wid, ScreenPtr pScreen, int newX, int newY)
         return;
     frame->x = newX;
     frame->y = newY;
-    r = nbFramePoints(newX, newY, frame->width, frame->height);
+    r = nbPixelFrameToPoints(newX, newY, frame->width, frame->height);
     if (ws_window_set_frame(nbConnection(), frame->wid, &r) < 0)
         nbWindowServerLost("move");
 }
@@ -848,8 +841,8 @@ void
 nbFrameSetByWindowServer(nbFrame *frame, const ws_rect_t *pr)
 {
     WindowPtr pWin = nbFrameWindow(frame);
-    ws_rect_t had = nbFramePoints(frame->x, frame->y, frame->width,
-                                  frame->height);
+    ws_rect_t had = nbPixelFrameToPoints(frame->x, frame->y, frame->width,
+                                         frame->height);
     ws_rect_t rr, *r = &rr;
     int s = (int) nbScreenInfo.scale;
     Bool moved, sized;
@@ -906,7 +899,7 @@ nbFrameSetByWindowServer(nbFrame *frame, const ws_rect_t *pr)
     hgt = pWin->drawable.height + 2 * wBorderWidth(pWin);
     frame->x = x;
     frame->y = y;
-    now = nbFramePoints(x, y, w, hgt);
+    now = nbPixelFrameToPoints(x, y, w, hgt);
     if (now.x != pr->x || now.y != pr->y || now.width != pr->width ||
         now.height != pr->height) {
         if (ws_window_set_frame(nbConnection(), frame->wid, &now) < 0)
@@ -990,7 +983,7 @@ nbResizeFrame(RootlessFrameID wid, ScreenPtr pScreen, int newX, int newY,
     frame->width = newW;
     frame->height = newH;
     /* The new frame goes with the first buffer at the new size. */
-    r = nbFramePoints(newX, newY, newW, newH);
+    r = nbPixelFrameToPoints(newX, newY, newW, newH);
     /* What's around the client may have changed with it. */
     nbScreenInfo.frames_dirty = TRUE;
     RegionEmpty(&frame->damage);
@@ -1451,7 +1444,8 @@ nbFramesRescale(void)
         if (frame->shaped || (nbFrameWindow(frame) != NULL &&
                               wInputShape(nbFrameWindow(frame)) != NULL))
             nbFrameSendInputRegion(frame, nbFrameWindow(frame));
-        r = nbFramePoints(frame->x, frame->y, frame->width, frame->height);
+        r = nbPixelFrameToPoints(frame->x, frame->y, frame->width,
+                                 frame->height);
         nbFrameDamageAll(frame);
         nbFrameCommitWithFrame(frame, &r);
         if (nbConnection() == NULL)

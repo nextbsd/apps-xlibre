@@ -77,7 +77,6 @@ typedef struct nbFrame {
     int x, y;                   /* screen position, border included, in
                                    X pixels */
     unsigned int width, height; /* X pixels */
-    unsigned int scale;         /* pixels per point of its buffers */
     int32_t level;              /* WS_LEVEL_* */
     uint32_t flags;             /* WS_WINDOW_* */
     uint32_t format;            /* WS_FORMAT_* of the buffer */
