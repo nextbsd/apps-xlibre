@@ -88,7 +88,9 @@ typedef struct nbGlamor {
     struct gbm_device *gbm;
     EGLDisplay display;
     EGLContext context;
-    Bool dmabuf_capable;        /* dmabuf import and export with modifiers */
+    Bool has_modifiers;         /* EGL_EXT_image_dma_buf_import_modifiers */
+    Bool dmabuf_capable;        /* DRI3 offers modifiers (has_modifiers,
+                                   unless XNEXTBSD_DMABUF_MODIFIERS=0) */
     Bool has_image_dma_buf_export;
 #ifdef WS_SERVER_DMABUF
     ws_dmabuf_formats_t ws_formats; /* what WindowServer composites */
@@ -180,7 +182,7 @@ nbGlamorPixmapFromBO(PixmapPtr pixmap, struct gbm_bo *bo, Bool used_modifiers)
         attrs[n++] = gbm_bo_get_offset(bo, i);
         attrs[n++] = plane_attrs[i][2];
         attrs[n++] = gbm_bo_get_stride_for_plane(bo, i);
-        if (nbGL.dmabuf_capable && modifier != DRM_FORMAT_MOD_INVALID) {
+        if (nbGL.has_modifiers && modifier != DRM_FORMAT_MOD_INVALID) {
             attrs[n++] = plane_attrs[i][3];
             attrs[n++] = (EGLint) (modifier & 0xffffffffu);
             attrs[n++] = plane_attrs[i][4];
@@ -804,9 +806,10 @@ nbGlamorInit(ScreenPtr pScreen)
         goto fail;
     }
     /* DRI3 1.2 modifiers: tiled buffers between clients and us. */
-    nbGL.dmabuf_capable =
+    nbGL.has_modifiers =
         epoxy_has_egl_extension(nbGL.display,
-                                "EGL_EXT_image_dma_buf_import_modifiers") &&
+                                "EGL_EXT_image_dma_buf_import_modifiers");
+    nbGL.dmabuf_capable = nbGL.has_modifiers &&
         !(mods != NULL && strcmp(mods, "0") == 0);
     glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture);
     lastGLContext = NULL;
