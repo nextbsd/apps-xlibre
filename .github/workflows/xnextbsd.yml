@@ -6,8 +6,10 @@ name: Build Xnextbsd
 # Xorg: the pinned XLibre tarball, nextbsd-xlibre's patch series and meson
 # cross files (read only, at the commit Xnextbsd/sources.lock pins), and this
 # repo's patch and hw/nextbsd. build-xnextbsd.sh then checks the binary:
-# what it links (WindowServer and Mach, no DRM, udev or libinput), not
-# set-uid, its compiled-in paths, no build-host paths.
+# what it links (WindowServer and Mach, GBM, libdrm and libepoxy for
+# glamor, no udev or libinput), not set-uid, its compiled-in paths, no
+# build-host paths. Mesa (nextbsd-mesa) and libepoxy (nextbsd-xlibre) are
+# staged for glamor (nextbsd/apps-xlibre#10).
 #
 # The sysroot is compat's `continuous` base with nextbsd-userland's
 # (liblaunch, libsystem_kernel and the Mach headers, which
@@ -101,6 +103,30 @@ jobs:
             fi
           done
           echo "$n nextbsd-xlibs copies of displayserver-support files removed from the sysroot"
+
+      # Glamor (nextbsd/apps-xlibre#10): GBM, EGL and the GL headers from
+      # nextbsd-mesa's two continuous artifacts (as nextbsd-xlibre stages
+      # them for Xorg's glamor), and libepoxy, which nextbsd-xlibre builds,
+      # from its continuous artifact (only libepoxy's files).
+      - name: Stage Mesa and libepoxy for glamor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for a in nextbsd-mesa nextbsd-mesa-x11; do
+            gh release download continuous \
+              --repo nextbsd/nextbsd-mesa \
+              --pattern "$a-${{ matrix.arch }}.tar.gz" \
+              --output "/tmp/$a.tar.gz" --clobber
+            tar -C "$GITHUB_WORKSPACE/sysroot" -xzf "/tmp/$a.tar.gz"
+          done
+          gh release download continuous \
+            --repo nextbsd/nextbsd-xlibre \
+            --pattern "nextbsd-xlibre-${{ matrix.arch }}.tar.gz" \
+            --output /tmp/xlibre.tar.gz --clobber
+          tar -C "$GITHUB_WORKSPACE/sysroot" -xzf /tmp/xlibre.tar.gz \
+            --wildcards './usr/X11/include/epoxy/*' './usr/X11/lib/libepoxy.so*' \
+            './usr/X11/lib/pkgconfig/epoxy.pc'
+          ls -la "$GITHUB_WORKSPACE/sysroot/usr/X11/lib/" | grep -E 'gbm|EGL|epoxy'
 
       - name: Build and check Xnextbsd
         env:

@@ -1,0 +1,59 @@
+Description: composite: don't copy to or from a rootless server's root.
+ When a window is redirected, compNewPixmap seeds its new pixmap with what
+ is under it in the parent, and compRestoreWindow copies it back on
+ unredirect. A rootless server's root has no image: its pixmap is one
+ scanline that every row aliases (devKind 0). fb reads that harmlessly,
+ but glamor's CopyArea uploads it as a full-size image and reads far past
+ the allocation. Xnextbsd on the GPU segfaulted in v3d_move_tiled_image
+ as soon as Chromium's screen-share picker redirected the top-level
+ windows for its thumbnails. Skip both copies when the parent is a root
+ with a zero-stride pixmap; there is nothing there to copy.
+Origin: NextBSD
+ (nextbsd/apps-xlibre#34, E37 nextbsd/nextbsd#625)
+Forwarded: not-needed (NextBSD only, for now)
+---
+--- a/composite/compalloc.c
++++ b/composite/compalloc.c
+@@ -230,13 +230,30 @@
+     return status;
+ }
+ 
++/*
++ * A rootless server's root has no image: its pixmap is one scanline that
++ * every row aliases (devKind 0). There is nothing to copy to or from it,
++ * and an accelerated CopyArea or Composite (glamor) would treat it as a
++ * full-size image and run past its end.
++ */
++static Bool
++compRootlessRoot(WindowPtr pWin)
++{
++    ScreenPtr pScreen = pWin->drawable.pScreen;
++
++    return pWin->parent == NULL &&
++        (*pScreen->GetWindowPixmap) (pWin)->devKind == 0;
++}
++
+ void
+ compRestoreWindow(WindowPtr pWin, PixmapPtr pPixmap)
+ {
+     ScreenPtr pScreen = pWin->drawable.pScreen;
+     WindowPtr pParent = pWin->parent;
+ 
+-    if (pParent->drawable.depth == pWin->drawable.depth) {
++    if (compRootlessRoot(pParent))
++        ;                       /* nothing there to copy */
++    else if (pParent->drawable.depth == pWin->drawable.depth) {
+         GCPtr pGC = GetScratchGC(pWin->drawable.depth, pScreen);
+         int bw = (int) pWin->borderWidth;
+         int x = bw;
+@@ -556,7 +573,9 @@
+      * This can be very expensive, so we only do it when we absolutely have to.
+      */
+ 
+-    if (pParent->drawable.depth == pWin->drawable.depth) {
++    if (compRootlessRoot(pParent))
++        ;                       /* nothing there to copy */
++    else if (pParent->drawable.depth == pWin->drawable.depth) {
+         GCPtr pGC = GetScratchGC(pWin->drawable.depth, pScreen);
+ 
+         if (pGC) {

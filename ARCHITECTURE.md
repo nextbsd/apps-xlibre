@@ -175,6 +175,41 @@ XLibre/
   WindowServer's scaled "looks like" modes, WindowServer scales X windows
   to the panel with everything else, and the root window's screen capture
   is asked for at the X screen's size.
+- **The GPU (nextbsd/apps-xlibre#10):** when WindowServer takes GPU
+  buffers (`WS_SERVER_DMABUF`, "GPU buffers" in its `WSProtocol.h`) and EGL
+  works on the render node it names (`/dev/dri/renderD128`, v3d, on a
+  Raspberry Pi 5), Xnextbsd draws on the GPU (`nbGlamor.c`). Glamor, on an
+  EGL context on GBM, does X rendering. Each top-level window's backing is
+  a glamor pixmap, which rootless draws into through a `GetPixmap` frame
+  proc (`patches/xlibre-xserver/0002`) instead of CPU memory. Its two
+  WindowServer buffers are GBM buffer objects with a modifier WindowServer
+  listed (Broadcom UIF on the Pi), handed over as dmabufs. A commit copies
+  the damage into a free one on the GPU, flushes and attaches it, with the
+  same `BUFFER_RELEASE`, frame pacing, resizes and HiDPI scale as shared
+  memory, and no CPU copy.
+  X clients get DRI3 (with modifiers), Present (copy mode, timed by a fake
+  vblank) and GLX (glamor's EGL provider; clients render directly with
+  DRI3), so GL and EGL programs render on the GPU. Linux Chromium's GPU
+  process, for one, gets ANGLE on OpenGL ES on V3D, GPU compositing and
+  WebGL.
+  - **Chromium:** run it with `--use-angle=gles-egl`. ANGLE's default on
+    X11 is GLX, which presents the whole window every frame, four
+    full-window GPU passes in all, and is slower for video than software.
+    With Mesa's EGL on X11, only what changed is presented, and 720p60
+    video plays at 60 fps.
+  - **GTK 3 and GL:** XLibre.app sets `GDK_GL=disable` for its X programs,
+    so that GTK 3 doesn't load Mesa just to pick visuals. That made Linux
+    Chromium's browser process crash at startup.
+  - **Fallback:** without GPU buffers, a render node or a usable EGL, or
+    with `-nogpu` or `XNEXTBSD_GPU=0` in Xnextbsd's environment, it is fb
+    and shared memory as before, with no DRI3 or GLX.
+  - **Not readable by WindowServer:** WindowServer can't read GPU buffers
+    on the CPU, so X windows drawn in them are missing from its captures
+    and the Dock's previews.
+  - **Linux programs** need `Xnextbsd/tools/drmetime.c` preloaded until
+    nextbsd/nextbsd-kernel#424 is fixed. The Linuxulator hands DRM wait
+    timeouts to Linux Mesa as `ETIMEDOUT` rather than `ETIME`, and Linux
+    Mesa's v3d driver aborts on it.
 - **The clipboard bridge and gpbs:** NSPasteboard. The bridge owns
   CLIPBOARD for the general pasteboard and PRIMARY for the "Selection"
   pasteboard, as xpbs does, and copies new X owners' data to them: text

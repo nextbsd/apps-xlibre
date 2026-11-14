@@ -303,7 +303,9 @@ ddxUseMsg(void)
            "in points times the scale, and _XNEXTBSD_SCALE on the root "
            "window says the scale).\n"
            "-lowres                draw at 1x instead and let WindowServer "
-           "scale X windows up\n");
+           "scale X windows up\n"
+           "-nogpu                 draw in CPU memory (fb) even when the GPU "
+           "could (also XNEXTBSD_GPU=0)\n");
 }
 
 int
@@ -311,6 +313,10 @@ ddxProcessArgument(int argc, char *argv[], int i)
 {
     if (strcmp(argv[i], "-lowres") == 0) {
         nbScreenInfo.lowres = TRUE;
+        return 1;
+    }
+    if (strcmp(argv[i], "-nogpu") == 0) {
+        nbScreenInfo.nogpu = TRUE;
         return 1;
     }
     return 0;
@@ -387,6 +393,14 @@ nbScreenInit(ScreenPtr pScreen, int argc, char **argv)
         return FALSE;
     if (!fbPictureInit(pScreen, 0, 0))
         return FALSE;
+
+    /*
+     * On the GPU when WindowServer takes GPU buffers and EGL works on its
+     * render node (nbGlamor.c): glamor below damage and rootless, which
+     * wrap it, with DRI3, Present and GLX for X clients. Otherwise fb in
+     * CPU memory, as before.
+     */
+    nbGlamorInit(pScreen);
 
     /* Damage has to wrap underneath rootless, so it goes first. */
     if (!DamageSetup(pScreen))

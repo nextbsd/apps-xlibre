@@ -23,9 +23,10 @@
 #               meson install into a scratch root): it is
 #               installed inside XLibre.app (Resources/Xnextbsd), never in
 #               a system path, and it is not set-uid;
-#   5. check    what it links (WindowServer and Mach, no DRM, udev or
-#               libinput), that it isn't set-uid, its compiled-in paths,
-#               and that it names no build-host path.
+#   5. check    what it links (WindowServer and Mach; GBM, libdrm and
+#               libepoxy for glamor on the GPU; no udev or libinput), that
+#               it isn't set-uid, its compiled-in paths, and that it names
+#               no build-host path.
 #
 # TWO WAYS TO RUN IT
 #   Cross (CI): inside the nextbsd-toolchain container, like nextbsd-xlibre,
@@ -197,8 +198,11 @@ configure_and_build() {
         set -- --cross-file "$paths" --cross-file "$BUILD/src/nextbsd-xlibre/cross/meson/$T.ini"
     fi
     rm -rf "$OBJ"
-    # Only Xnextbsd: no Xorg (and so no DRM, glamor, udev or libinput), no
-    # other DDX, no GLX yet (software rendering; acceleration is later work).
+    # Only Xnextbsd: no Xorg (and so no udev or libinput) and no other
+    # DDX. Glamor on GBM and EGL (libepoxy) draws on the GPU when
+    # WindowServer takes GPU buffers, with DRI3, Present and GLX (glamor's
+    # EGL provider; no server-side DRI drivers) for X clients
+    # (nextbsd/apps-xlibre#10); without a GPU it draws with fb as before.
     # __FILE__ is mapped away from the build host's directories.
     "$MESON" setup "$OBJ" "$SRC" "$@" \
         --prefix="$X_PREFIX" --libdir=lib --buildtype=release \
@@ -206,7 +210,8 @@ configure_and_build() {
         -Dc_args="-fmacro-prefix-map=$SRC/= -fmacro-prefix-map=$OBJ/=" \
         -Dxorg=false -Dxnextbsd=true -Dxvfb=false -Dxnest=false \
         -Dxephyr=false -Dxfbdev=false -Dxwin=false -Dxquartz=false \
-        -Dglamor=false -Ddrm=false -Dglx=false -Ddri2=false -Ddri3=false \
+        -Dglamor=true -Ddrm=true -Dglx=true -Dglx_dri=false -Ddri1=false \
+        -Ddri2=false -Ddri3=true \
         -Dpciaccess=false -Dudev=false -Dudev_kms=false -Dhal=false \
         -Dsystemd_logind=false -Dsystemd_notify=false -Dseatd_libseat=false \
         -Dsuid_wrapper=false -Dxselinux=false -Ddtrace=false \
@@ -236,20 +241,23 @@ check() {
     comp "checks"
 
     # What it links: WindowServer's client library (which links liblaunch
-    # and libsystem_kernel, the Mach and bootstrap libraries), and nothing
-    # of the console display stack Xorg uses.
+    # and libsystem_kernel, the Mach and bootstrap libraries), GBM,
+    # libdrm and libepoxy (glamor; libepoxy loads EGL and GL itself), and
+    # nothing of the console display stack Xorg uses.
     needed=$("$READELF" -d "$x" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')
     [ -n "$needed" ] || fail "can't read Xnextbsd's DT_NEEDED with $READELF"
     printf '%s\n' $needed | sed 's/^/      NEEDED /'
     printf '%s\n' $needed | grep -qx 'libWindowServerClient.so.1' \
         || fail "Xnextbsd doesn't link libWindowServerClient.so.1"
-    for p in 'libdrm\.' 'libudev\.' 'libinput\.' 'libevdev\.' 'libgbm\.' \
-             'libEGL\.' 'libGL\.' 'libGLX\.' 'libepoxy\.' 'libpciaccess\.'; do
+    for p in libgbm.so.1 libepoxy.so.0 libdrm.so.2; do
+        printf '%s\n' $needed | grep -qx "$p" || fail "Xnextbsd doesn't link $p (glamor)"
+    done
+    for p in 'libudev\.' 'libinput\.' 'libevdev\.' 'libpciaccess\.'; do
         if printf '%s\n' $needed | grep -E "^$p"; then
             fail "Xnextbsd links $p"
         fi
     done
-    note "links libWindowServerClient.so.1; no DRM, udev, libinput, GBM, EGL, GL or libpciaccess"
+    note "links libWindowServerClient.so.1, and libgbm, libdrm and libepoxy for glamor; no udev, libinput or libpciaccess"
     if [ "$MODE" = cross ]; then
         lib="$SYSROOT/usr/lib/libWindowServerClient.so.1"
         for p in liblaunch.so.1 libsystem_kernel.so.0; do

@@ -322,6 +322,14 @@ NSString *const URSXConnectionLostNotification = @"URSXConnectionLostNotificatio
     [env setObject:[_server display] forKey:@"DISPLAY"];
     [env setObject:[_server authority] forKey:@"XAUTHORITY"];
     [env removeObjectForKey:@"XNEXTBSD_JOIN"];
+    // GTK 3 opens GLX on every X display it connects to, for its visuals,
+    // which on Xnextbsd's GPU (GLX and DRI3, apps-xlibre#10) loads Mesa's
+    // driver into every GTK 3 program. Linux Chromium's browser process
+    // then crashed in about one start in four (none in 18 with this off,
+    // and its GPU process still renders on the GPU). GTK 3 programs don't
+    // need GL to draw; a user who wants GtkGLArea can set GDK_GL.
+    if ([env objectForKey:@"GDK_GL"] == nil)
+        [env setObject:@"disable" forKey:@"GDK_GL"];
     return env;
 }
 

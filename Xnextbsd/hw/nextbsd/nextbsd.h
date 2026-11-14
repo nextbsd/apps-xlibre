@@ -54,6 +54,9 @@
  */
 typedef struct nbBuffer {
     ws_buffer_t *ws;            /* NULL until first needed */
+    PixmapPtr pixmap;           /* GPU frames: the buffer as a glamor pixmap
+                                   (a GBM buffer object WindowServer has as a
+                                   dmabuf); NULL for shared memory */
     unsigned int width, height; /* its pixels: the frame's, rounded up to
                                    whole points */
     Bool busy;                  /* attached, or not handed back yet */
@@ -69,7 +72,9 @@ typedef struct nbBuffer {
 typedef struct nbFrame {
     struct xorg_list link;      /* nbScreen.frames */
     uint32_t wid;               /* WindowServer window id */
-    char *bits;                 /* the backing rootless draws into */
+    char *bits;                 /* the backing rootless draws into (CPU) */
+    PixmapPtr pixmap;           /* the backing on the GPU (glamor), instead
+                                   of bits, when nbGlamorEnabled() */
     unsigned int stride;        /* bytes per row of bits */
     nbBuffer buffers[NB_NBUFFERS];
     Bool frame_pending;         /* committed, WS_EVENT_FRAME_DONE not in */
@@ -111,6 +116,7 @@ typedef struct nbScreen {
                                    WS_SERVER_SCALE) */
     Bool lowres;                /* -lowres: X draws at 1x and WindowServer
                                    scales it up, as XQuartz's apps are */
+    Bool nogpu;                 /* -nogpu: fb in CPU memory, even with a GPU */
     Bool scale_dirty;           /* NB_SCALE_ATOM not on the root yet */
     int mm_width, mm_height;
     unsigned int refresh_mhz;   /* WindowServer's refresh rate, 0 if unknown */
@@ -261,6 +267,23 @@ void nbCursorRescale(void);
 Bool nbCaptureInit(ScreenPtr pScreen);
 void nbCaptureEvent(const ws_event_t *ev);
 void nbCaptureBlockHandler(void);
+
+/* nbGlamor.c: glamor, GPU buffers, DRI3, Present and GLX */
+Bool nbGlamorInit(ScreenPtr pScreen);
+Bool nbGlamorEnabled(void);
+PixmapPtr nbGlamorCreateFramePixmap(ScreenPtr pScreen, int width, int height,
+                                    int depth);
+void nbGlamorDestroyPixmap(PixmapPtr pixmap);
+ws_buffer_t *nbGlamorBufferCreate(PixmapPtr *pixmap, unsigned int width,
+                                  unsigned int height, unsigned int scale,
+                                  uint32_t format);
+void nbGlamorUpdateBuffer(PixmapPtr from, PixmapPtr to, RegionPtr copy,
+                          RegionPtr clear);
+void nbGlamorCopyArea(PixmapPtr from, PixmapPtr to, int sx, int sy, int w,
+                      int h, int dx, int dy);
+void nbGlamorCopyWithin(PixmapPtr pixmap, int nbox, const BoxRec *boxes,
+                        int dx, int dy);
+void nbGlamorFlush(void);
 
 /* nbConfig.c: the keyboard settings WindowServer itself uses */
 typedef struct nbKeyboardConfig {
