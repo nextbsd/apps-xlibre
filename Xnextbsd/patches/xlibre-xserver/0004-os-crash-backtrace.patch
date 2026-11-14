@@ -1,0 +1,219 @@
+Description: os: print the crash context (PC, LR, frame chain) on a fatal signal.
+ The stock handler's xorg_backtrace() unwinds from inside the signal
+ handler, which on NextBSD usually prints nothing past the handler (or
+ nothing at all without HAVE_BACKTRACE): the glamor segfault fixed by
+ 0003 (#34) showed only "Segmentation fault at address ...". On SIGSEGV,
+ SIGBUS, SIGILL, SIGFPE, SIGABRT and SIGSYS, OsSigHandler now first prints,
+ from the SA_SIGINFO ucontext, the faulting PC, the LR (arm64:
+ mc_gpregs.gp_elr, gp_lr, gp_x[29]; amd64: mc_rip, mc_rbp) and the chain
+ of saved frame pointers, walked only while it is sane (aligned, mapped,
+ above the stack pointer, strictly increasing in steps of at most 1 MiB,
+ at most 64 frames). Each line names the module and the offset in it,
+ from dladdr, which llvm-symbolizer resolves:
+ .
+   pc 0x... /usr/X11/bin/Xnextbsd 0x1a2b3c (glamor_copy+0x48)
+   #1 0x... /usr/lib/libgallium.so 0x4d5e6f
+ .
+   llvm-symbolizer --obj=<module> <offset>
+ .
+ Return addresses are looked up one byte back, in the call. The walk
+ reaches past the first frame only through code built with frame
+ pointers (build-xnextbsd.sh builds with -fno-omit-frame-pointer).
+ .
+ It also finds backtrace() in libexecinfo, where the BSDs have it, so
+ HAVE_BACKTRACE is set and xorg_backtrace() runs after the dump.
+Origin: NextBSD
+ (nextbsd/apps-xlibre#37, E37 nextbsd/nextbsd#625)
+Forwarded: not-needed (NextBSD only, for now)
+---
+--- a/meson.build
++++ b/meson.build
+@@ -609,6 +609,8 @@
+ 
+ m_dep = cc.find_library('m', required : false)
+ dl_dep = cc.find_library('dl', required : false)
++# backtrace() is in libexecinfo on the BSDs (in libc on glibc and musl).
++execinfo_dep = cc.find_library('execinfo', required : false)
+ 
+ common_dep = [
+     xproto_dep,
+--- a/include/meson.build
++++ b/include/meson.build
+@@ -138,7 +138,7 @@
+ 
+ conf_data.set('HAVE_ARC4RANDOM_BUF', cc.has_function('arc4random_buf', dependencies: libbsd_dep) ? '1' : false)
+ conf_data.set('HAVE_GETRANDOM', cc.has_function('getrandom', prefix: '#include <sys/random.h>') ? '1' : false)
+-conf_data.set('HAVE_BACKTRACE', cc.has_function('backtrace') ? '1' : false)
++conf_data.set('HAVE_BACKTRACE', cc.has_function('backtrace', dependencies: execinfo_dep) ? '1' : false)
+ conf_data.set('HAVE_CBRT', cc.has_function('cbrt') ? '1' : false)
+ conf_data.set('HAVE_EPOLL_CREATE1', cc.has_function('epoll_create1') ? '1' : false)
+ conf_data.set('HAVE_GETUID', cc.has_function('getuid') ? '1' : false)
+--- a/os/meson.build
++++ b/os/meson.build
+@@ -101,6 +101,7 @@
+         dtrace_dep,
+         common_dep,
+         dl_dep,
++        execinfo_dep,
+         sha1_dep,
+         os_dep,
+         dependency('xau')
+--- a/os/osinit.c
++++ b/os/osinit.c
+@@ -88,9 +88,136 @@
+     OsSigWrapper = newSigWrapper;
+ 
+     return oldSigWrapper;
++}
++
++#if defined(SA_SIGINFO) && defined(__FreeBSD__) && \
++    (defined(__aarch64__) || defined(__x86_64__))
++#include <stdint.h>
++#include <sys/mman.h>
++#include <ucontext.h>
++#include <unistd.h>
++#define OS_CRASH_FRAMES 1
++
++#define CRASH_MAX_FRAMES     64
++#define CRASH_MAX_FRAME_SIZE (1UL << 20)   /* one frame: at most 1 MiB */
++#define CRASH_MAX_STACK      (64UL << 20)  /* the whole walk: 64 MiB */
++
++/*
++ * One line per address, with the module and the offset llvm-symbolizer
++ * takes for it ("llvm-symbolizer --obj=<module> <offset>", or the
++ * "<module> <offset>" pairs on its stdin). A shared object's or PIE's
++ * offset is from its load base; a fixed-address (ET_EXEC) executable's is
++ * the address itself. A return address is looked up one byte back, in
++ * the call instruction, so it names the caller's line, not the next.
++ */
++static void
++OsCrashFrame(const char *tag, int n, uintptr_t addr, Bool is_return)
++{
++    uintptr_t lookup = is_return ? addr - 1 : addr;
++    uintptr_t off = lookup;
++    const char *mod = "??";
++    const char *sym = NULL;
++    uintptr_t symoff = 0;
++#ifdef HAVE_DLFCN_H
++    Dl_info info;
++
++    if (lookup != 0 && dladdr((void *) lookup, &info) != 0) {
++        const unsigned char *eh = info.dli_fbase;
++
++        if (info.dli_fname && *info.dli_fname)
++            mod = info.dli_fname;
++        /* e_type is at offset 16 in both ELF classes; 2 is ET_EXEC */
++        if (!(eh && eh[0] == 0x7f && eh[1] == 'E' && eh[2] == 'L' &&
++              eh[3] == 'F' && *(const uint16_t *) (eh + 16) == 2))
++            off = lookup - (uintptr_t) info.dli_fbase;
++        if (info.dli_sname && info.dli_saddr) {
++            sym = info.dli_sname;
++            symoff = lookup - (uintptr_t) info.dli_saddr;
++        }
++    }
++#endif
++    if (n >= 0)
++        ErrorF("  %s%d", tag, n);
++    else
++        ErrorF("  %s", tag);
++    if (sym)
++        ErrorF(" %p %s 0x%lx (%s+0x%lx)\n", (void *) addr, mod,
++               (unsigned long) off, sym, (unsigned long) symoff);
++    else
++        ErrorF(" %p %s 0x%lx\n", (void *) addr, mod, (unsigned long) off);
++}
++
++/*
++ * Whether the frame record at fp (two words) is mapped: mincore() fails
++ * with ENOMEM on an unmapped page where a load would fault again inside
++ * this handler.
++ */
++static Bool
++OsCrashMapped(uintptr_t fp)
++{
++    uintptr_t mask = ~((uintptr_t) sysconf(_SC_PAGESIZE) - 1);
++    char vec;
++
++    return mincore((void *) (fp & mask), 1, &vec) == 0 &&
++        mincore((void *) ((fp + 2 * sizeof(uintptr_t) - 1) & mask), 1,
++                &vec) == 0;
+ }
+ 
+ /*
++ * The faulting PC, the link register (arm64) and the chain of saved frame
++ * pointers, from the interrupted context. execinfo's backtrace() starts in
++ * this handler and often can't unwind through the signal frame; the
++ * context has the registers at the fault. Each frame record is
++ * { saved frame pointer, return address } on both arm64 (x29) and amd64
++ * (%rbp). The walk reads the stack without faulting only as far as the
++ * chain is sane: aligned, mapped, above the stack pointer, strictly
++ * increasing, in bounded steps, for a bounded number of frames. It needs
++ * -fno-omit-frame-pointer to reach far.
++ */
++static void
++OsCrashDump(int signo, const ucontext_t *uc)
++{
++    const mcontext_t *mc = &uc->uc_mcontext;
++    uintptr_t pc, sp, fp, next, ret;
++    int n;
++
++#if defined(__aarch64__)
++    pc = mc->mc_gpregs.gp_elr;
++    sp = mc->mc_gpregs.gp_sp;
++    fp = mc->mc_gpregs.gp_x[29];
++#else
++    pc = mc->mc_rip;
++    sp = mc->mc_rsp;
++    fp = mc->mc_rbp;
++#endif
++
++    ErrorF("\nCrash context (%s): pc %p sp %p fp %p\n", strsignal(signo),
++           (void *) pc, (void *) sp, (void *) fp);
++    ErrorF("  [frame] address module offset (symbol): "
++           "symbolize with llvm-symbolizer --obj=<module> <offset>\n");
++    OsCrashFrame("pc", -1, pc, FALSE);
++#if defined(__aarch64__)
++    OsCrashFrame("lr", -1, mc->mc_gpregs.gp_lr, TRUE);
++#endif
++
++    for (n = 1; n <= CRASH_MAX_FRAMES; n++) {
++        if (fp == 0 || (fp & (sizeof(uintptr_t) - 1)) != 0 || fp < sp ||
++            fp - sp > CRASH_MAX_STACK || !OsCrashMapped(fp))
++            break;
++        next = ((const uintptr_t *) fp)[0];
++        ret = ((const uintptr_t *) fp)[1];
++        if (ret == 0)
++            break;
++        OsCrashFrame("#", n, ret, TRUE);
++        if (next <= fp || next - fp > CRASH_MAX_FRAME_SIZE)
++            break;
++        fp = next;
++    }
++    ErrorF("\n");
++}
++#endif
++
++/*
+  * OsSigHandler --
+  *    Catch unexpected signals and exit or continue cleanly.
+  */
+@@ -120,6 +247,19 @@
+     }
+ 
+     /* log, cleanup, and abort */
++#ifdef OS_CRASH_FRAMES
++    /* first: it doesn't depend on unwinding through this handler */
++    switch (signo) {
++    case SIGSEGV:
++    case SIGBUS:
++    case SIGILL:
++    case SIGFPE:
++    case SIGABRT:
++    case SIGSYS:
++        if (unused)
++            OsCrashDump(signo, unused);
++    }
++#endif
+     xorg_backtrace();
+ 
+ #ifdef SA_SIGINFO

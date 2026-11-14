@@ -24,7 +24,8 @@
 #               installed inside XLibre.app (Resources/Xnextbsd), never in
 #               a system path, and it is not set-uid;
 #   5. check    what it links (WindowServer and Mach; GBM, libdrm and
-#               libepoxy for glamor on the GPU; no udev or libinput), that
+#               libepoxy for glamor on the GPU; libexecinfo for crash
+#               backtraces; no udev or libinput), that
 #               it isn't set-uid, its compiled-in paths, and that it names
 #               no build-host path.
 #
@@ -203,11 +204,13 @@ configure_and_build() {
     # WindowServer takes GPU buffers, with DRI3, Present and GLX (glamor's
     # EGL provider; no server-side DRI drivers) for X clients
     # (nextbsd/apps-xlibre#10); without a GPU it draws with fb as before.
-    # __FILE__ is mapped away from the build host's directories.
+    # __FILE__ is mapped away from the build host's directories. Frame
+    # pointers are kept, so that the crash dump (patch 0004) can walk the
+    # stack from the faulting frame (nextbsd/apps-xlibre#37).
     "$MESON" setup "$OBJ" "$SRC" "$@" \
         --prefix="$X_PREFIX" --libdir=lib --buildtype=release \
         --wrap-mode=nodownload \
-        -Dc_args="-fmacro-prefix-map=$SRC/= -fmacro-prefix-map=$OBJ/=" \
+        -Dc_args="-fmacro-prefix-map=$SRC/= -fmacro-prefix-map=$OBJ/= -fno-omit-frame-pointer" \
         -Dxorg=false -Dxnextbsd=true -Dxvfb=false -Dxnest=false \
         -Dxephyr=false -Dxfbdev=false -Dxwin=false -Dxquartz=false \
         -Dglamor=true -Ddrm=true -Dglx=true -Dglx_dri=false -Ddri1=false \
@@ -258,6 +261,12 @@ check() {
         fi
     done
     note "links libWindowServerClient.so.1, and libgbm, libdrm and libepoxy for glamor; no udev, libinput or libpciaccess"
+    # backtrace() for the crash dump (patch 0004, nextbsd/apps-xlibre#37):
+    # without libexecinfo, HAVE_BACKTRACE is off and xorg_backtrace()
+    # prints nothing.
+    printf '%s\n' $needed | grep -qx 'libexecinfo.so.1' \
+        || fail "Xnextbsd doesn't link libexecinfo.so.1 (HAVE_BACKTRACE is off)"
+    note "links libexecinfo.so.1 (backtrace)"
     if [ "$MODE" = cross ]; then
         lib="$SYSROOT/usr/lib/libWindowServerClient.so.1"
         for p in liblaunch.so.1 libsystem_kernel.so.0; do
