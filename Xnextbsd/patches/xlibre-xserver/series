@@ -8,6 +8,10 @@
 #         Xnextbsd's frames can be glamor pixmaps (nextbsd/apps-xlibre#10).
 #   0003  composite: no copies to or from a rootless root, whose pixmap
 #         is a single aliased scanline (glamor read past it: #34).
+#   0004  os: on a fatal signal, print the faulting PC, LR and frame
+#         chain with module offsets for llvm-symbolizer, and link
+#         backtrace() from libexecinfo (#37).
 0001-meson-xnextbsd-option.patch
 0002-rootless-frame-pixmaps.patch
 0003-composite-rootless-root.patch
+0004-os-crash-backtrace.patch
