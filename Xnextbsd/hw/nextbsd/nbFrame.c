@@ -80,6 +80,13 @@
  * buffers carry the scale, so WindowServer shows them pixel for pixel.
  * When the scale changes, every frame gets new buffers and its frame in
  * the new points (nbFramesRescale).
+ *
+ * GPU frames (nbGlamor.c, when nbGlamorEnabled()): the backing is a glamor
+ * pixmap rootless draws into (nbGetPixmap) instead of CPU memory, the two
+ * buffers are GPU buffers WindowServer has as dmabufs, and everything above
+ * that copies pixels (a commit's update of a buffer, a resize's gravity,
+ * rootless's CopyWindow) does it on the GPU. The commit flushes the GL
+ * commands first; WindowServer's reads wait for them (implicit sync).
  */
 
 #include <dix-config.h>
@@ -105,6 +112,9 @@
 /* At most this many damage rectangles per commit; more become their
    bounding box. */
 #define NB_MAX_DAMAGE_RECTS 64
+
+static void nbDamageRects(RootlessFrameID wid, int nrects,
+                          const BoxRec *rects, int shift_x, int shift_y);
 
 static ws_rect_t
 nbRect(int x, int y, unsigned int w, unsigned int h)
@@ -147,6 +157,11 @@ nbBufferCreate(nbBuffer *buf, unsigned int width, unsigned int height,
     unsigned int h = nbPixelsToPointsUp((int) (height ? height : 1)) * s;
     ws_buffer_t *buffer;
 
+    if (nbGlamorEnabled()) {
+        buf->width = w;
+        buf->height = h;
+        return nbGlamorBufferCreate(&buf->pixmap, w, h, s, format);
+    }
     buffer = ws_buffer_create_format(nbConnection(), w, h, s, format);
     if (buffer == NULL)
         ErrorF("Xnextbsd: can't make a %ux%u window buffer: %s\n",
@@ -161,6 +176,22 @@ static Bool
 nbBackingAlloc(nbFrame *frame, unsigned int width, unsigned int height)
 {
     unsigned int stride = (width ? width : 1) * 4;
+
+    if (nbGlamorEnabled()) {
+        WindowPtr pWin = nbFrameWindow(frame);
+
+        frame->bits = NULL;
+        frame->stride = 0;
+        frame->pixmap = pWin == NULL ? NULL :
+            nbGlamorCreateFramePixmap(pWin->drawable.pScreen, width, height,
+                                      pWin->drawable.depth);
+        if (frame->pixmap == NULL) {
+            ErrorF("Xnextbsd: can't make a %ux%u window pixmap\n",
+                   width, height);
+            return FALSE;
+        }
+        return TRUE;
+    }
 
     frame->bits = calloc(height ? height : 1, stride);
     if (frame->bits == NULL) {
@@ -183,6 +214,8 @@ nbBuffersDestroy(nbFrame *frame)
         if (frame->buffers[i].ws != NULL && nbConnection() != NULL)
             ws_buffer_destroy(nbConnection(), frame->buffers[i].ws);
         frame->buffers[i].ws = NULL;
+        nbGlamorDestroyPixmap(frame->buffers[i].pixmap);
+        frame->buffers[i].pixmap = NULL;
         frame->buffers[i].busy = FALSE;
         RegionEmpty(&frame->buffers[i].stale);
     }
@@ -194,9 +227,53 @@ nbBuffersDestroy(nbFrame *frame)
  * window has no alpha of its own, and the rest is made transparent.
  */
 static void
+nbBufferUpdateGPU(nbFrame *frame, nbBuffer *buf, RegionPtr region)
+{
+    BoxRec all = { 0, 0, frame->width, frame->height };
+    RegionRec in, out;
+
+    RegionInit(&in, &all, 1);
+    RegionIntersect(&in, &in, region);
+    RegionNull(&out);
+    if (frame->shaped) {
+        RegionSubtract(&out, &in, &frame->shape);
+        RegionIntersect(&in, &in, &frame->shape);
+    }
+    /*
+     * A frame of an odd size on a 2x screen: the buffer's padding past
+     * the frame's right and bottom edges takes the edge's pixels (the
+     * copy's source repeats them) where the region reaches the edge.
+     */
+    if ((buf->width > frame->width || buf->height > frame->height) &&
+        RegionNotEmpty(region)) {
+        BoxRec e = *RegionExtents(region), b;
+        RegionRec pad;
+
+        if (buf->width > frame->width && e.x2 >= (int) frame->width) {
+            b = (BoxRec) { frame->width, e.y1, buf->width,
+                           e.y2 >= (int) frame->height ? buf->height : e.y2 };
+            RegionInit(&pad, &b, 1);
+            RegionUnion(&in, &in, &pad);
+            RegionUninit(&pad);
+        }
+        if (buf->height > frame->height && e.y2 >= (int) frame->height) {
+            b = (BoxRec) { e.x1, frame->height,
+                           e.x2 >= (int) frame->width ? buf->width : e.x2,
+                           buf->height };
+            RegionInit(&pad, &b, 1);
+            RegionUnion(&in, &in, &pad);
+            RegionUninit(&pad);
+        }
+    }
+    nbGlamorUpdateBuffer(frame->pixmap, buf->pixmap, &in, &out);
+    RegionUninit(&in);
+    RegionUninit(&out);
+}
+
+static void
 nbBufferUpdate(nbFrame *frame, nbBuffer *buf, RegionPtr region)
 {
-    char *dst = ws_buffer_data(buf->ws);
+    char *dst;
     unsigned int dstride = ws_buffer_stride(buf->ws);
     WindowPtr pWin = nbFrameWindow(frame);
     Bool opaque = pWin == NULL || pWin->drawable.depth != 32;
@@ -206,6 +283,12 @@ nbBufferUpdate(nbFrame *frame, nbBuffer *buf, RegionPtr region)
     int i, n, x, y;
     size_t len;
 
+    if (buf->pixmap != NULL) {
+        if (frame->pixmap != NULL)
+            nbBufferUpdateGPU(frame, buf, region);
+        return;
+    }
+    dst = ws_buffer_data(buf->ws);
     RegionInit(&in, &all, 1);
     RegionIntersect(&in, &in, region);
     RegionNull(&out);
@@ -344,6 +427,9 @@ nbFrameCommitWithFrame(nbFrame *frame, const ws_rect_t *rect)
                           nbPixelsToPointsUp(box[i].y2) - y1);
     }
     RegionEmpty(&frame->damage);
+    /* GPU buffers: the copy is on its way before WindowServer samples it */
+    if (buf->pixmap != NULL)
+        nbGlamorFlush();
 
     if (ws_window_attach(nbConnection(), frame->wid, buf->ws) < 0 ||
         ws_window_damage(nbConnection(), frame->wid, rects, n) < 0 ||
@@ -797,6 +883,7 @@ nbDestroyFrame(RootlessFrameID wid)
     RegionUninit(&frame->damage);
     RegionUninit(&frame->shape);
     free(frame->bits);
+    nbGlamorDestroyPixmap(frame->pixmap);
     free(frame->title);
     free(frame);
 }
@@ -951,22 +1038,62 @@ nbCopyByGravity(const char *from, unsigned int fstride, unsigned int ow,
     }
 }
 
+/* The same on the GPU, between the old and the new pixmap. */
+static void
+nbCopyByGravityGPU(PixmapPtr from, unsigned int ow, unsigned int oh,
+                   PixmapPtr to, unsigned int nw, unsigned int nh,
+                   unsigned int gravity)
+{
+    unsigned int w = min(ow, nw), h = min(oh, nh);
+    unsigned int sx = 0, sy = 0, dx = 0, dy = 0;
+
+    switch (gravity) {
+    case RL_GRAVITY_NORTH_WEST:
+        break;
+    case RL_GRAVITY_NORTH_EAST:
+        sx = ow - w;
+        dx = nw - w;
+        break;
+    case RL_GRAVITY_SOUTH_EAST:
+        sx = ow - w;
+        dx = nw - w;
+        sy = oh - h;
+        dy = nh - h;
+        break;
+    case RL_GRAVITY_SOUTH_WEST:
+        sy = oh - h;
+        dy = nh - h;
+        break;
+    default:
+        return;
+    }
+    nbGlamorCopyArea(from, to, sx, sy, w, h, dx, dy);
+}
+
 static void
 nbResizeFrame(RootlessFrameID wid, ScreenPtr pScreen, int newX, int newY,
               unsigned int newW, unsigned int newH, unsigned int gravity)
 {
     nbFrame *frame = wid;
     char *old = frame->bits;
+    PixmapPtr oldpix = frame->pixmap;
     unsigned int ostride = frame->stride;
     ws_rect_t r;
 
     if (newW != frame->width || newH != frame->height) {
         if (!nbBackingAlloc(frame, newW, newH)) {
             frame->bits = old;  /* keep the old size; X redraws into it */
+            frame->pixmap = oldpix;
             return;
         }
-        nbCopyByGravity(old, ostride, frame->width, frame->height,
-                        frame->bits, frame->stride, newW, newH, gravity);
+        if (oldpix != NULL) {
+            nbCopyByGravityGPU(oldpix, frame->width, frame->height,
+                               frame->pixmap, newW, newH, gravity);
+            nbGlamorDestroyPixmap(oldpix);
+        } else {
+            nbCopyByGravity(old, ostride, frame->width, frame->height,
+                            frame->bits, frame->stride, newW, newH, gravity);
+        }
         free(old);
         /*
          * New buffers at the new size, made by the commit below.
@@ -1107,6 +1234,33 @@ nbStartDrawing(RootlessFrameID wid, char **pixelData, int *bytesPerRow)
 
     *pixelData = frame->bits;
     *bytesPerRow = frame->stride;
+}
+
+/* GPU frames: rootless draws into the frame's glamor pixmap. */
+static PixmapPtr
+nbGetPixmap(RootlessFrameID wid)
+{
+    nbFrame *frame = wid;
+
+    return frame->pixmap;
+}
+
+/*
+ * GPU frames: rootless's CopyWindow (a window scrolled or moved within
+ * its frame): the boxes, frame-local, take what is (dx, dy) from them,
+ * and are shown.
+ */
+static void
+nbCopyWindow(RootlessFrameID wid, int nrects, const BoxRec *rects, int dx,
+             int dy)
+{
+    nbFrame *frame = wid;
+
+    if (frame->pixmap == NULL)
+        return;
+    nbGlamorCopyWithin(frame->pixmap, nrects, rects, dx, dy);
+    nbDamageRects(wid, nrects, rects, 0, 0);
+    nbFrameCommit(frame);
 }
 
 static void
@@ -1556,5 +1710,10 @@ nbFrameInit(ScreenPtr pScreen)
     nbScreenInfo.hidden = FALSE;
     if (!AddCallback(&PropertyFilterCallback, nbPropertyFilter, NULL))
         return FALSE;
+    if (nbGlamorEnabled()) {
+        /* GPU frames: glamor pixmaps, copied within on the GPU */
+        nbRootlessProcs.GetPixmap = nbGetPixmap;
+        nbRootlessProcs.CopyWindow = nbCopyWindow;
+    }
     return RootlessInit(pScreen, &nbRootlessProcs);
 }

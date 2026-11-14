@@ -1,0 +1,140 @@
+Description: rootless: frames may draw into a pixmap of their own (GPU frames).
+ RootlessStartDrawing wraps the pixels the implementation's StartDrawing
+ hands it in a scratch pixmap header, so every frame is CPU memory that fb
+ draws into. A new optional frame proc, GetPixmap, lets the implementation
+ hand rootless a pixmap of its own instead: Xnextbsd's frames are glamor
+ pixmaps when it runs on the GPU (nextbsd/apps-xlibre#10), so X rendering
+ into top-level windows goes through glamor. Rootless never frees such a
+ pixmap, doesn't point it at pixelData when the window moves, and copies
+ within such a frame with the implementation's CopyWindow whatever the
+ area (fbCopyWindowProc has no pixels to copy). Without GetPixmap, or when
+ it returns NULL, nothing changes.
+Origin: NextBSD
+ (nextbsd/apps-xlibre#10, E37 nextbsd/nextbsd#625)
+Forwarded: not-needed (NextBSD only, for now)
+ .
+ Against XLibre 25.1.11 with nextbsd-xlibre's patches/xlibre-xserver series
+ and 0001-meson-xnextbsd-option.patch applied.
+---
+diff --git a/miext/rootless/rootless.h b/miext/rootless/rootless.h
+index 74245eb..3455bad 100644
+--- a/miext/rootless/rootless.h
++++ b/miext/rootless/rootless.h
+@@ -69,6 +69,7 @@ typedef struct _RootlessWindowRec {
+     PixmapPtr pixmap;
+ 
+     unsigned int is_drawing:1;  // Currently drawing?
++    unsigned int is_frame_pixmap:1;     // pixmap is the frame's own (GetPixmap)
+     unsigned int is_reorder_pending:1;
+     unsigned int is_offscreen:1;
+     unsigned int is_obscured:1;
+@@ -277,6 +278,19 @@ typedef void (*RootlessCopyBytesProc)
+ typedef void (*RootlessCopyWindowProc)
+  (RootlessFrameID wid, int dstNrects, const BoxRec * dstRects, int dx, int dy);
+ 
++/*
++ * GetPixmap (optional): the frame's own pixmap, which rootless draws into
++ * instead of a scratch pixmap header over StartDrawing's pixels. An
++ * implementation whose frames are GPU pixmaps (glamor) returns its pixmap
++ * here; NULL falls back to StartDrawing. The pixmap stays the
++ * implementation's: rootless never frees it. With GetPixmap, CopyWindow
++ * is used for every copy within a frame (there are no pixels for fb to
++ * copy), and it must show what it copied.
++ *
++ *  wid         Frame ID
++ */
++typedef PixmapPtr (*RootlessGetPixmapProc) (RootlessFrameID wid);
++
+ typedef void (*RootlessHideWindowProc)
+  (RootlessFrameID wid);
+ 
+@@ -310,6 +324,9 @@ typedef struct _RootlessFrameProcs {
+     /* Optional acceleration functions */
+     RootlessCopyBytesProc CopyBytes;
+     RootlessCopyWindowProc CopyWindow;
++
++    /* Optional frame pixmaps (GPU frames) */
++    RootlessGetPixmapProc GetPixmap;
+ } RootlessFrameProcsRec, *RootlessFrameProcsPtr;
+ 
+ /*
+diff --git a/miext/rootless/rootlessCommon.c b/miext/rootless/rootlessCommon.c
+index 4b059d8..517fff1 100644
+--- a/miext/rootless/rootlessCommon.c
++++ b/miext/rootless/rootlessCommon.c
+@@ -175,15 +175,29 @@ RootlessStartDrawing(WindowPtr pWindow)
+     // Make sure the window's top-level parent is prepared for drawing.
+     if (!winRec->is_drawing) {
+         int bw = wBorderWidth(top);
+-
+-        SCREENREC(pScreen)->imp->StartDrawing(winRec->wid, &winRec->pixelData,
+-                                              &winRec->bytesPerRow);
+-
+-        winRec->pixmap =
+-            GetScratchPixmapHeader(pScreen, winRec->width, winRec->height,
+-                                   top->drawable.depth,
+-                                   top->drawable.bitsPerPixel,
+-                                   winRec->bytesPerRow, winRec->pixelData);
++        PixmapPtr framePixmap = NULL;
++
++        if (SCREENREC(pScreen)->imp->GetPixmap)
++            framePixmap = SCREENREC(pScreen)->imp->GetPixmap(winRec->wid);
++
++        if (framePixmap) {
++            /* The frame's own pixmap (a GPU one): no pixels to wrap. */
++            winRec->pixelData = NULL;
++            winRec->bytesPerRow = 0;
++            winRec->pixmap = framePixmap;
++            winRec->is_frame_pixmap = TRUE;
++        } else {
++            SCREENREC(pScreen)->imp->StartDrawing(winRec->wid,
++                                                  &winRec->pixelData,
++                                                  &winRec->bytesPerRow);
++
++            winRec->pixmap =
++                GetScratchPixmapHeader(pScreen, winRec->width, winRec->height,
++                                       top->drawable.depth,
++                                       top->drawable.bitsPerPixel,
++                                       winRec->bytesPerRow, winRec->pixelData);
++            winRec->is_frame_pixmap = FALSE;
++        }
+ 
+         RL_DEBUG_MSG("GetScratchPixmapHeader gave us %p %p (%d,%d %dx%d %d) for wid=%lu\n",
+                      winRec->pixmap, winRec->pixmap->devPrivate.ptr, winRec->pixmap->drawable.x,
+@@ -283,7 +297,9 @@ RootlessStopDrawing(WindowPtr pWindow, Bool flush)
+     if (winRec->is_drawing) {
+         SCREENREC(pScreen)->imp->StopDrawing(winRec->wid, flush);
+ 
+-        FreeScratchPixmapHeader(winRec->pixmap);
++        if (!winRec->is_frame_pixmap)
++            FreeScratchPixmapHeader(winRec->pixmap);
++        winRec->is_frame_pixmap = FALSE;
+         TraverseTree(top, RestorePreDrawingPixmapVisitor, (void *) winRec);
+         winRec->pixmap = NULL;
+ 
+diff --git a/miext/rootless/rootlessWindow.c b/miext/rootless/rootlessWindow.c
+index 3f4302b..becd4ed 100644
+--- a/miext/rootless/rootlessWindow.c
++++ b/miext/rootless/rootlessWindow.c
+@@ -321,7 +321,8 @@ void RootlessWindowPosition(CallbackListPtr *pcbl, ScreenPtr pScreen, XorgScreen
+             // Reset frame's pixmap and move it to the new position.
+             int bw = wBorderWidth(pWin);
+ 
+-            winRec->pixmap->devPrivate.ptr = winRec->pixelData;
++            if (!winRec->is_frame_pixmap)
++                winRec->pixmap->devPrivate.ptr = winRec->pixelData;
+             SetPixmapBaseToScreen(winRec->pixmap, param->x - bw, param->y - bw);
+         }
+     }
+@@ -660,7 +661,10 @@ RootlessCopyWindow(WindowPtr pWin, DDXPointRec ptOldOrg, RegionPtr prgnSrc)
+ 
+     /* If the area exceeds threshold, use the implementation's
+        accelerated version. */
+-    if (area > rootless_CopyWindow_threshold &&
++    /* Frames with pixmaps of their own (GetPixmap) have no pixels for
++       fbCopyWindowProc: they always copy with CopyWindow. */
++    if ((area > rootless_CopyWindow_threshold ||
++         SCREENREC(pScreen)->imp->GetPixmap) &&
+         SCREENREC(pScreen)->imp->CopyWindow) {
+         RootlessWindowRec *winRec;
+         WindowPtr top;

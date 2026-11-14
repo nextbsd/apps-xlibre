@@ -29,6 +29,7 @@ nextbsd-xlibre      7b084e8a7230ffaaef87140be8d0084b2a60e6ca  77243026ceb2976d48
 # client (apps-windowserver#8, #9), and window tiling (apps-windowserver#44:
 # frames with sizes, size limits, panel and fixed-size windows), and screen
 # capture with the Screen Recording consent (apps-windowserver#49: the
-# root window reads it, apps-xlibre#29), which Xnextbsd uses when the
-# WindowServer it runs on has them.
-apps-windowserver   a44515734049793c510d8acba2af9b096e6aae4e  ea3ed453d768688700f9307e5d9aabddc8d6eb71575f764c72f252bcccfad5ef  https://github.com/nextbsd/apps-windowserver/archive/a44515734049793c510d8acba2af9b096e6aae4e.tar.gz
+# root window reads it, apps-xlibre#29), and GPU buffers (dmabufs, E38
+# T12: Xnextbsd's frames on the GPU, apps-xlibre#10), which Xnextbsd uses
+# when the WindowServer it runs on has them.
+apps-windowserver   4d70dc3b26ba728d17126bb5df2cc0d35aea7dac  fb22b1edbb6573e5230e73548608c9b8ebef9362672ac5c1ad8c6b42853d8704  https://github.com/nextbsd/apps-windowserver/archive/4d70dc3b26ba728d17126bb5df2cc0d35aea7dac.tar.gz
