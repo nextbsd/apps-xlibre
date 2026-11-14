@@ -192,6 +192,14 @@ XLibre/
   DRI3), so GL and EGL programs render on the GPU. Linux Chromium's GPU
   process, for one, gets ANGLE on OpenGL ES on V3D, GPU compositing and
   WebGL.
+  - **Chromium:** run it with `--use-angle=gles-egl`. ANGLE's default on
+    X11 is GLX, which presents the whole window every frame, four
+    full-window GPU passes in all, and is slower for video than software.
+    With Mesa's EGL on X11, only what changed is presented, and 720p60
+    video plays at 60 fps.
+  - **GTK 3 and GL:** XLibre.app sets `GDK_GL=disable` for its X programs,
+    so that GTK 3 doesn't load Mesa just to pick visuals. That made Linux
+    Chromium's browser process crash at startup.
   - **Fallback:** without GPU buffers, a render node or a usable EGL, or
     with `-nogpu` or `XNEXTBSD_GPU=0` in Xnextbsd's environment, it is fb
     and shared memory as before, with no DRI3 or GLX.
