@@ -11,7 +11,11 @@
 #   0004  os: on a fatal signal, print the faulting PC, LR and frame
 #         chain with module offsets for llvm-symbolizer, and link
 #         backtrace() from libexecinfo (#37).
+#   0005  rootless: windows hold a reference to the frame pixmap they
+#         draw into, so Composite unredirecting them doesn't free it
+#         (share-start and window-destroy segfaults, #43).
 0001-meson-xnextbsd-option.patch
 0002-rootless-frame-pixmaps.patch
 0003-composite-rootless-root.patch
 0004-os-crash-backtrace.patch
+0005-rootless-hold-frame-pixmap.patch
