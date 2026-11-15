@@ -1,0 +1,113 @@
+Description: rootless: windows hold a reference to the frame pixmap they draw into.
+ To draw into a top-level window, rootless points the window (and its
+ children as they draw) at the frame's pixmap, and back when it stops.
+ Composite redirects some of those windows: Chromium's screen-share
+ picker redirects every top-level window for its thumbnails, and Composite
+ redirects windows with an alpha channel by itself (the picker's own
+ dialog). When Composite unredirects a window, it frees whatever pixmap
+ the window has, which was the frame's: Xnextbsd then drew into, or
+ freed again, a freed pixmap and segfaulted (damagePolyFillRect at share
+ start with GPU frames; dixDestroyPixmap from RootlessStopDrawing on
+ window destroy with CPU frames).
+ .
+ The window now takes a reference to the frame's pixmap when rootless
+ gives it to it, and drops it when rootless takes it back, so Composite's
+ free only drops that reference. If Composite unredirected the window in
+ between, rootless frees the pixmap Composite allocated (kept as the
+ window's old pixmap) in its place. Windows give back their references
+ before the frame's scratch header is freed. Redirected windows keep
+ drawing into the frame, as before: an earlier attempt (#39) stopped
+ that, and the picker vanished.
+Origin: NextBSD
+ (nextbsd/apps-xlibre#43)
+Forwarded: not-needed (NextBSD only, for now)
+---
+--- a/miext/rootless/rootlessCommon.c
++++ b/miext/rootless/rootlessCommon.c
+@@ -242,6 +242,15 @@
+         dixSetPrivate(&pWindow->devPrivates, rootlessWindowOldPixmapPrivateKey,
+                       curPixmap);
+         pScreen->SetWindowPixmap(pWindow, winRec->pixmap);
++        /*
++         * The window holds a reference to the frame's pixmap while it has
++         * it: Composite frees whatever pixmap a window has when it
++         * unredirects it, and that must not free the frame's (the window
++         * may well be redirected: Composite redirects windows with an
++         * alpha channel itself, and the frame is how they reach the
++         * screen). RestorePreDrawingPixmapVisitor drops it.
++         */
++        winRec->pixmap->refcnt++;
+     }
+ }
+ 
+@@ -259,28 +268,46 @@
+     PixmapPtr oldPixmap =
+         dixLookupPrivate(&pWindow->devPrivates,
+                          rootlessWindowOldPixmapPrivateKey);
++
+     if (oldPixmap == NULL) {
+         if (exPixmap == winRec->pixmap)
+             RL_DEBUG_MSG
+                 ("Window %p appears to be in drawing mode (ex-pixmap %p equals winRec->pixmap, which is being freed) but has no oldPixmap!\n",
+                  pWindow, exPixmap);
++        return WT_WALKCHILDREN;
+     }
+-    else {
+-        if (exPixmap != winRec->pixmap)
+-            RL_DEBUG_MSG
+-                ("Window %p appears to be in drawing mode (oldPixmap %p) but ex-pixmap %p not winRec->pixmap %p!\n",
+-                 pWindow, oldPixmap, exPixmap, winRec->pixmap);
+-        if (oldPixmap == winRec->pixmap)
+-            RL_DEBUG_MSG
+-                ("Window %p's oldPixmap %p is winRec->pixmap, which has just been freed!\n",
+-                 pWindow, oldPixmap);
++    if (exPixmap == winRec->pixmap) {
++        /* back to its own, and the reference StartDrawing took goes */
+         pScreen->SetWindowPixmap(pWindow, oldPixmap);
+-        dixSetPrivate(&pWindow->devPrivates, rootlessWindowOldPixmapPrivateKey,
+-                      NULL);
++        dixDestroyPixmap(winRec->pixmap, 0);
++    }
++    else {
++        /*
++         * Something replaced the frame's pixmap while we drew: Composite.
++         * Unredirecting, it freed "its" pixmap, which was the frame's
++         * (that took our reference) and not the one it allocated, which
++         * we kept in oldPixmap: free that for it. Redirecting, it swapped
++         * its own in and the frame's reference stays taken (a leak, not
++         * a use after free).
++         */
++        RL_DEBUG_MSG("Window %p's pixmap %p isn't winRec->pixmap %p\n",
++                     pWindow, exPixmap, winRec->pixmap);
++#ifdef COMPOSITE
++        if (pWindow->redirectDraw == RedirectDrawNone &&
++            oldPixmap != pScreen->GetScreenPixmap(pScreen))
++            dixDestroyPixmap(oldPixmap, 0);
++#endif
+     }
++    dixSetPrivate(&pWindow->devPrivates, rootlessWindowOldPixmapPrivateKey,
++                  NULL);
+     return WT_WALKCHILDREN;
+ }
+ 
++/*
++ * RootlessStopDrawing
++ *  Stop drawing to a window's backing buffer. If flush is true,
++ *  damaged regions are flushed to the screen.
++ */
+ void
+ RootlessStopDrawing(WindowPtr pWindow, Bool flush)
+ {
+@@ -297,10 +324,11 @@
+     if (winRec->is_drawing) {
+         SCREENREC(pScreen)->imp->StopDrawing(winRec->wid, flush);
+ 
++        /* the windows first: they drop their references to it */
++        TraverseTree(top, RestorePreDrawingPixmapVisitor, (void *) winRec);
+         if (!winRec->is_frame_pixmap)
+             FreeScratchPixmapHeader(winRec->pixmap);
+         winRec->is_frame_pixmap = FALSE;
+-        TraverseTree(top, RestorePreDrawingPixmapVisitor, (void *) winRec);
+         winRec->pixmap = NULL;
+ 
+         winRec->is_drawing = FALSE;
