@@ -118,9 +118,20 @@ typedef struct nbCapture {
     int damage_watchers;        /* Damage objects on the root */
     CARD32 last_read;           /* GetTimeInMillis() of the last read */
     Bool have_frame;            /* the frame we hold */
+    Bool read;                  /* a client has read it */
     ws_event_capture_frame_t frame;
     const char *data;
     uint32_t stride;
+    /*
+     * A newer frame that came before anyone read the one we hold. We
+     * keep both and give WindowServer neither back, so with its two
+     * buffers it sends no more until a client reads: frames come at the
+     * rate the root is read (Jitsi shares at 5 fps), not the stream's.
+     */
+    Bool have_next;
+    ws_event_capture_frame_t next;
+    const char *next_data;
+    uint32_t next_stride;
     uint32_t width, height;
 } nbCapture;
 
@@ -175,6 +186,27 @@ nbCaptureDropFrame(nbCapture *cap)
         ws_capture_release(nbConnection(), &cap->frame);
     cap->have_frame = FALSE;
     cap->data = NULL;
+    if (cap->have_next && nbConnection() != NULL)
+        ws_capture_release(nbConnection(), &cap->next);
+    cap->have_next = FALSE;
+    cap->next_data = NULL;
+}
+
+/* A client reads the root: the newest frame becomes the one we hold. */
+static void
+nbCaptureTakeNext(nbCapture *cap)
+{
+    if (cap->have_next) {
+        if (cap->have_frame && nbConnection() != NULL)
+            ws_capture_release(nbConnection(), &cap->frame);
+        cap->frame = cap->next;
+        cap->data = cap->next_data;
+        cap->stride = cap->next_stride;
+        cap->have_frame = TRUE;
+        cap->have_next = FALSE;
+        cap->next_data = NULL;
+    }
+    cap->read = TRUE;
 }
 
 static void
@@ -286,6 +318,7 @@ nbCaptureRead(ClientPtr client)
         return NULL;
     cc->cap->last_read = GetTimeInMillis();
     nbCaptureStart(cc->cap);
+    nbCaptureTakeNext(cc->cap);
     return cc->cap;
 }
 
@@ -625,12 +658,24 @@ nbCaptureEvent(const ws_event_t *ev)
             ws_capture_release(nbConnection(), f);
             break;
         }
-        /* keep the newest frame, give the one before back */
-        nbCaptureDropFrame(cap);
-        cap->frame = *f;
-        cap->have_frame = TRUE;
-        cap->data = data;
-        cap->stride = stride;
+        if (cap->have_frame && !cap->read) {
+            /* nobody read the one we hold yet: keep this one too (only
+               the newest), and WindowServer waits for a read */
+            if (cap->have_next)
+                ws_capture_release(nbConnection(), &cap->next);
+            cap->next = *f;
+            cap->next_data = data;
+            cap->next_stride = stride;
+            cap->have_next = TRUE;
+        } else {
+            /* keep the newest frame, give the one before back */
+            nbCaptureDropFrame(cap);
+            cap->frame = *f;
+            cap->have_frame = TRUE;
+            cap->read = FALSE;
+            cap->data = data;
+            cap->stride = stride;
+        }
         cap->state = NB_CAPTURE_RUNNING;
         nbCaptureDamageRoot(cap, f);
         break;
