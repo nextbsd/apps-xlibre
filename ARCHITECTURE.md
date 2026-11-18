@@ -122,11 +122,30 @@ XLibre/
   above the tiles. WindowServer also gets each window's title (the
   client's name), which the Dock shows.
 - **Screen changes:** when WindowServer's screen changes size, Xnextbsd
-  resizes the root window and tells X clients through RandR (one output,
-  the current mode; X clients can't set another). WindowServer moves the
+  resizes the root window and tells X clients through RandR (the current
+  mode; X clients can't set another). WindowServer moves the
   windows that no longer fit just onto the screen, and Xnextbsd moves the
   X windows with them; the window manager then moves those frames into
   the usable area.
+- **Several displays (nextbsd/apps-xlibre#46):** on a WindowServer with
+  displays (`WS_SERVER_DISPLAYS`, "Displays" in its `WSProtocol.h`), the
+  X screen is the rectangle around them all, its 0, 0 that rectangle's
+  top-left corner, and RandR has an output per display (`nbRandR.c`),
+  named after its connector (`eDP-1`, `DP-1`), on a CRTC of its own at
+  the display's place, in one mode: the display's size in X pixels, named
+  after its "looks like" size. The main display's output is the primary
+  one, and a mirroring display's output is a clone on the CRTC of the
+  display it shows. RandR 1.5 makes a monitor of each CRTC, and RandR's
+  Xinerama emulation answers Xinerama from them (`xrandr --listmonitors`,
+  `xdpyinfo -ext XINERAMA`). When the displays change
+  (`WS_EVENT_DISPLAYS_CHANGED`) they are listed again and X clients get
+  RandR's notifies; an output whose display went away stays,
+  disconnected. X clients can't change the displays: RandR refuses
+  anything but the current configuration. The window manager puts a
+  full-screen window (`_NET_WM_STATE_FULLSCREEN`) on the monitor it is
+  mostly on, and maximizes onto its monitor's part of the workarea (the
+  whole monitor off the main display). On a WindowServer without
+  displays it is one output, named after the screen, as before.
 - **Screen sharing:** X11 capture tools (Firefox's WebRTC, so Jitsi Meet
   sharing "Entire screen"; recorders; `xwd -root`) read the root window with
   `GetImage` or MIT-SHM's `ShmGetImage`, and may follow it with DAMAGE.

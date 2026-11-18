@@ -2223,7 +2223,8 @@ static XCBConnection *sharedInstance;
         uint32_t workareaWidth = [screen width], workareaHeight = [screen height];
         
         XCBWindow *rootWindow = [screen rootWindow];
-        if ([ewmhService readWorkareaForRootWindow:rootWindow x:&workareaX y:&workareaY width:&workareaWidth height:&workareaHeight]) {
+        // The workarea on the display the frame is on
+        if ([ewmhService readWorkareaForRootWindow:rootWindow nearRect:[frame windowRect] x:&workareaX y:&workareaY width:&workareaWidth height:&workareaHeight]) {
             //NSLog(@"[Maximize] Using workarea: x=%d, y=%d, width=%u, height=%u", 
             //      workareaX, workareaY, workareaWidth, workareaHeight);
         } else {

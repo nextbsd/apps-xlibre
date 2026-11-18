@@ -31,5 +31,7 @@ nextbsd-xlibre      7b084e8a7230ffaaef87140be8d0084b2a60e6ca  77243026ceb2976d48
 # capture with the Screen Recording consent (apps-windowserver#49: the
 # root window reads it, apps-xlibre#29), and GPU buffers (dmabufs, E38
 # T12: Xnextbsd's frames on the GPU, apps-xlibre#10), which Xnextbsd uses
-# when the WindowServer it runs on has them.
-apps-windowserver   4d70dc3b26ba728d17126bb5df2cc0d35aea7dac  fb22b1edbb6573e5230e73548608c9b8ebef9362672ac5c1ad8c6b42853d8704  https://github.com/nextbsd/apps-windowserver/archive/4d70dc3b26ba728d17126bb5df2cc0d35aea7dac.tar.gz
+# when the WindowServer it runs on has them, and several displays (E40 T6,
+# apps-windowserver#90: the display list and WS_EVENT_DISPLAYS_CHANGED, on
+# its displays branch for now; apps-xlibre#46: an RandR output per display).
+apps-windowserver   dac6993b2f95c51ce05b3eac12f60a7a25ef804f  503ccb4657b19728707f79914898edc46adb540a3d9fea6a74741e3179277a9b  https://github.com/nextbsd/apps-windowserver/archive/dac6993b2f95c51ce05b3eac12f60a7a25ef804f.tar.gz
