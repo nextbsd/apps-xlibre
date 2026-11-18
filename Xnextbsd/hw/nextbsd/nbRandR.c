@@ -353,7 +353,6 @@ nbRandRSetCurrent(ScreenPtr pScreen)
     /* Without displays, one of the screen, as before them. */
     if (n == 0) {
         memset(&screen, 0, sizeof(screen));
-        screen.main = TRUE;
         screen.frame.x = nbScreenInfo.origin_x;
         screen.frame.y = nbScreenInfo.origin_y;
         screen.frame.width = pScreen->width / s;
@@ -485,12 +484,22 @@ nbRandRSetCurrent(ScreenPtr pScreen)
             continue;
         RROutputSetModes(nbOutputs[k], NULL, 0, 0);
         RROutputSetClones(nbOutputs[k], NULL, 0);
+        RROutputSetPhysicalSize(nbOutputs[k], 0, 0);
         RROutputSetConnection(nbOutputs[k], RR_Disconnected);
     }
 
-    /* The primary output is the main display's (RRSetPrimaryOutput). */
-    if (primary == NULL)
+    /*
+     * The primary output is the main display's (RRSetPrimaryOutput), or
+     * the first's. Without displays it is left to X clients, as it always
+     * was, unless it was a display's that went away.
+     */
+    if (d == &screen) {
+        primary = pScrPriv->primaryOutput;
+        if (primary != NULL && primary->connection != RR_Connected)
+            primary = NULL;
+    } else if (primary == NULL) {
         primary = out[0];
+    }
     if (pScrPriv->primaryOutput != primary) {
         if (pScrPriv->primaryOutput != NULL)
             RROutputChanged(pScrPriv->primaryOutput, FALSE);
