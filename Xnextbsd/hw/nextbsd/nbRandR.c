@@ -262,9 +262,20 @@ nbRandRMode(int width, int height, int name_w, int name_h,
     return RRModeGet(&info, name);
 }
 
-/* The output named name, made the first time. */
+/* Is name one of the n displays' at d? */
+static Bool
+nbDisplayNamed(const nbDisplay *d, int n, const char *name)
+{
+    for (int i = 0; i < n; i++)
+        if (strcmp(d[i].name, name) == 0)
+            return TRUE;
+    return FALSE;
+}
+
+/* The output named name, made the first time; d, n are the displays. */
 static RROutputPtr
-nbRandROutput(ScreenPtr pScreen, const char *name)
+nbRandROutput(ScreenPtr pScreen, const char *name, const nbDisplay *d,
+              int n)
 {
     RROutputPtr output;
     int i;
@@ -276,7 +287,8 @@ nbRandROutput(ScreenPtr pScreen, const char *name)
     if (nbNumOutputs == NB_MAX_OUTPUTS) {
         for (i = 0; i < nbNumOutputs; i++)
             if (nbOutputs[i]->crtc == NULL &&
-                nbOutputs[i]->connection != RR_Connected)
+                nbOutputs[i]->connection != RR_Connected &&
+                !nbDisplayNamed(d, n, nbOutputs[i]->name))
                 break;
         if (i == nbNumOutputs)
             return NULL;
@@ -369,7 +381,7 @@ nbRandRSetCurrent(ScreenPtr pScreen)
 
     /* The outputs, made as displays first come. */
     for (i = 0; i < n; i++) {
-        out[i] = nbRandROutput(pScreen, d[i].name);
+        out[i] = nbRandROutput(pScreen, d[i].name, d, n);
         crtc[i] = NULL;
         if (out[i] == NULL)
             ok = FALSE;
