@@ -34,4 +34,4 @@ nextbsd-xlibre      7b084e8a7230ffaaef87140be8d0084b2a60e6ca  77243026ceb2976d48
 # when the WindowServer it runs on has them, and several displays (E40 T6,
 # apps-windowserver#90: the display list and WS_EVENT_DISPLAYS_CHANGED, on
 # its displays branch for now; apps-xlibre#46: an RandR output per display).
-apps-windowserver   dac6993b2f95c51ce05b3eac12f60a7a25ef804f  503ccb4657b19728707f79914898edc46adb540a3d9fea6a74741e3179277a9b  https://github.com/nextbsd/apps-windowserver/archive/dac6993b2f95c51ce05b3eac12f60a7a25ef804f.tar.gz
+apps-windowserver   a2bed8ff433474823b207686cb19d45801eb02c5  2fc47291884f54ea68d0dc7dc8ad214b25d950417ef1c66deeaa300453811673  https://github.com/nextbsd/apps-windowserver/archive/a2bed8ff433474823b207686cb19d45801eb02c5.tar.gz
