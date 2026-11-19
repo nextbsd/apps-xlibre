@@ -12,6 +12,7 @@
 #import "URSDecorationMetrics.h"
 #import "XCBTypes.h"
 #import <unistd.h>
+#import <xcb/randr.h>
 
 @protocol URSCompositingManaging <NSObject>
 + (instancetype)sharedManager;
@@ -811,11 +812,12 @@
             XCBFrame *frame;
             XCBTitleBar *titleBar;
 
-            // Read workarea to respect struts
+            // Read workarea to respect struts, on the display the window is on
             int32_t workareaX = 0, workareaY = 0;
             uint32_t workareaWidth = [screen width], workareaHeight = [screen height];
             XCBWindow *rootWindow = [screen rootWindow];
-            [self readWorkareaForRootWindow:rootWindow x:&workareaX y:&workareaY width:&workareaWidth height:&workareaHeight];
+            XCBRect placeRect = [aWindow decorated] ? [[aWindow parentWindow] windowRect] : [aWindow windowRect];
+            [self readWorkareaForRootWindow:rootWindow nearRect:placeRect x:&workareaX y:&workareaY width:&workareaWidth height:&workareaHeight];
 
             if (maxHorz)
             {
@@ -880,11 +882,12 @@
             XCBFrame *frame;
             XCBTitleBar *titleBar;
 
-            // Read workarea to respect struts
+            // Read workarea to respect struts, on the display the window is on
             int32_t workareaX = 0, workareaY = 0;
             uint32_t workareaWidth = [screen width], workareaHeight = [screen height];
             XCBWindow *rootWindow = [screen rootWindow];
-            [self readWorkareaForRootWindow:rootWindow x:&workareaX y:&workareaY width:&workareaWidth height:&workareaHeight];
+            XCBRect placeRect = [aWindow decorated] ? [[aWindow parentWindow] windowRect] : [aWindow windowRect];
+            [self readWorkareaForRootWindow:rootWindow nearRect:placeRect x:&workareaX y:&workareaY width:&workareaWidth height:&workareaHeight];
 
             if (maxVert)
             {
@@ -946,7 +949,14 @@
                         || (action == _NET_WM_STATE_TOGGLE && ![aWindow fullScreen]);
 
             XCBScreen *screen = [aWindow screen];
-            uint32_t scrW = [screen width], scrH = [screen height];
+
+            // Full screen is the display the window is on (its RandR
+            // monitor), not the whole root window, which spans every
+            // display.
+            XCBRect placeRect = [aWindow decorated] ? [[aWindow parentWindow] windowRect] : [aWindow windowRect];
+            XCBRect monitor = [self monitorRectForRect:placeRect rootWindow:[screen rootWindow]];
+            int32_t scrX = (int32_t)monitor.position.x, scrY = (int32_t)monitor.position.y;
+            uint32_t scrW = monitor.size.width, scrH = monitor.size.height;
 
             if (fullscr)
             {
@@ -982,10 +992,10 @@
                     }
                     [frame destroyResizeZones];
 
-                    // Resize frame to fill the whole screen
-                    XCBRect targetRect = XCBMakeRect(XCBMakePoint(0, 0),
+                    // Resize frame to fill the display
+                    XCBRect targetRect = XCBMakeRect(XCBMakePoint(scrX, scrY),
                                                       XCBMakeSize(scrW, scrH));
-                    uint32_t fvals[4] = {0, 0, scrW, scrH};
+                    uint32_t fvals[4] = {(uint32_t)scrX, (uint32_t)scrY, scrW, scrH};
                     xcb_configure_window([connection connection], [frame window],
                                          XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y
                                          | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
@@ -1013,13 +1023,13 @@
                 }
                 else
                 {
-                    // Undecorated window: resize to fill the whole screen
-                    uint32_t vals[4] = {0, 0, scrW, scrH};
+                    // Undecorated window: resize to fill the display
+                    uint32_t vals[4] = {(uint32_t)scrX, (uint32_t)scrY, scrW, scrH};
                     xcb_configure_window([connection connection], [aWindow window],
                                          XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y
                                          | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
                                          vals);
-                    [aWindow setWindowRect:XCBMakeRect(XCBMakePoint(0, 0),
+                    [aWindow setWindowRect:XCBMakeRect(XCBMakePoint(scrX, scrY),
                                                         XCBMakeSize(scrW, scrH))];
                     [aWindow setFullScreen:YES];
                     [connection flush];
@@ -1936,6 +1946,78 @@
     
     free(reply);
     return YES;
+}
+
+- (XCBRect) monitorRectForRect:(XCBRect)aRect rootWindow:(XCBWindow*)rootWindow
+{
+    xcb_connection_t *conn = [connection connection];
+    XCBScreen *screen = [rootWindow screen] ? [rootWindow screen] : [[connection screens] firstObject];
+    XCBRect best = XCBMakeRect(XCBMakePoint(0, 0),
+                               XCBMakeSize([screen width], [screen height]));
+
+    if (!conn || !rootWindow)
+        return best;
+    const xcb_query_extension_reply_t *randr = xcb_get_extension_data(conn, &xcb_randr_id);
+    if (!randr || !randr->present)
+        return best;
+
+    xcb_randr_get_monitors_reply_t *reply = xcb_randr_get_monitors_reply(conn,
+        xcb_randr_get_monitors(conn, [rootWindow window], 1), NULL);
+    if (!reply)
+        return best;
+
+    // The monitor with the most of aRect on it; with none, the one
+    // nearest its middle.
+    int64_t rx1 = (int64_t)aRect.position.x, ry1 = (int64_t)aRect.position.y;
+    int64_t rx2 = rx1 + aRect.size.width, ry2 = ry1 + aRect.size.height;
+    double cx = (rx1 + rx2) / 2.0, cy = (ry1 + ry2) / 2.0;
+    int64_t bestArea = -1;
+    double bestDistance = 0;
+    BOOL found = NO;
+    xcb_randr_monitor_info_iterator_t it = xcb_randr_get_monitors_monitors_iterator(reply);
+    for (; it.rem; xcb_randr_monitor_info_next(&it)) {
+        xcb_randr_monitor_info_t *m = it.data;
+        if (m->width == 0 || m->height == 0)
+            continue;
+        int64_t mx1 = m->x, my1 = m->y, mx2 = mx1 + m->width, my2 = my1 + m->height;
+        int64_t w = MIN(rx2, mx2) - MAX(rx1, mx1), h = MIN(ry2, my2) - MAX(ry1, my1);
+        int64_t area = (w > 0 && h > 0) ? w * h : 0;
+        double dx = cx < mx1 ? mx1 - cx : (cx > mx2 ? cx - mx2 : 0);
+        double dy = cy < my1 ? my1 - cy : (cy > my2 ? cy - my2 : 0);
+        double distance = dx * dx + dy * dy;
+        if (!found || area > bestArea || (area == bestArea && distance < bestDistance)) {
+            best = XCBMakeRect(XCBMakePoint(m->x, m->y), XCBMakeSize(m->width, m->height));
+            bestArea = area;
+            bestDistance = distance;
+            found = YES;
+        }
+    }
+    free(reply);
+    return best;
+}
+
+- (BOOL) readWorkareaForRootWindow:(XCBWindow*)rootWindow nearRect:(XCBRect)aRect x:(int32_t*)outX y:(int32_t*)outY width:(uint32_t*)outWidth height:(uint32_t*)outHeight
+{
+    XCBRect monitor = [self monitorRectForRect:aRect rootWindow:rootWindow];
+    int32_t wx = 0, wy = 0;
+    uint32_t ww = 0, wh = 0;
+    BOOL have = [self readWorkareaForRootWindow:rootWindow x:&wx y:&wy width:&ww height:&wh];
+    int64_t mx1 = (int64_t)monitor.position.x, my1 = (int64_t)monitor.position.y;
+    int64_t mx2 = mx1 + monitor.size.width, my2 = my1 + monitor.size.height;
+    int64_t x1 = mx1, y1 = my1, x2 = mx2, y2 = my2;
+
+    if (have) {
+        int64_t ix1 = MAX(mx1, (int64_t)wx), iy1 = MAX(my1, (int64_t)wy);
+        int64_t ix2 = MIN(mx2, (int64_t)wx + ww), iy2 = MIN(my2, (int64_t)wy + wh);
+        if (ix2 > ix1 && iy2 > iy1) {
+            x1 = ix1; y1 = iy1; x2 = ix2; y2 = iy2;
+        }
+    }
+    if (outX) *outX = (int32_t)x1;
+    if (outY) *outY = (int32_t)y1;
+    if (outWidth) *outWidth = (uint32_t)(x2 - x1);
+    if (outHeight) *outHeight = (uint32_t)(y2 - y1);
+    return have;
 }
 
 

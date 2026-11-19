@@ -219,6 +219,8 @@ nbConnect(void)
     if (si == NULL || si->width == 0 || si->height == 0)
         FatalError("Xnextbsd: WindowServer reported no screen\n");
     nbScreenInfo.server_flags = ws_server_flags(nbScreenInfo.conn);
+    /* With several displays, X's 0, 0 is the desktop's top-left corner. */
+    nbScreenOrigin(si, &nbScreenInfo.origin_x, &nbScreenInfo.origin_y);
     /* WindowServer's screen is in points; X's is in pixels. */
     nbScreenInfo.ws_scale = nbBackingScale(si);
     nbScreenInfo.scale = nbDrawScale(si);
@@ -339,6 +341,7 @@ nbBlockHandler(void *data, void *timeout)
     nbFocusCheck();
     nbUsableAreaPublish();
     nbScalePublish();
+    nbDisplaysPublish();
     nbCaptureBlockHandler();
     if (ws_pending(nbScreenInfo.conn)) {
         nbInputDrain();

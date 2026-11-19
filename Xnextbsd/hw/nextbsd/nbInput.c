@@ -751,8 +751,8 @@ nbPointerPixels(const ws_event_t *ev, nbFrame *frame, double *x, double *y)
         *x = frame->x + ev->u.pointer.x * s;
         *y = frame->y + ev->u.pointer.y * s;
     } else {
-        *x = ev->u.pointer.screen_x * s;
-        *y = ev->u.pointer.screen_y * s;
+        *x = (ev->u.pointer.screen_x - nbScreenInfo.origin_x) * s;
+        *y = (ev->u.pointer.screen_y - nbScreenInfo.origin_y) * s;
     }
 }
 
@@ -784,7 +784,8 @@ nbPointerResync(void)
     if (pi.window != 0 && nbFrameFromWID(pi.window) == NULL)
         return;
     nbScreenInfo.pointer_frame = nbFrameFromWID(pi.window);
-    nbPointerMotion(pi.x * nbScreenInfo.scale, pi.y * nbScreenInfo.scale);
+    nbPointerMotion((pi.x - nbScreenInfo.origin_x) * nbScreenInfo.scale,
+                    (pi.y - nbScreenInfo.origin_y) * nbScreenInfo.scale);
 }
 
 static void
@@ -902,6 +903,12 @@ nbHandleEvent(ws_connection_t *conn, const ws_event_t *ev, void *context)
     case WS_EVENT_SCREEN_CHANGED:
         nbScreenChanged(&ev->u.screen);
         break;
+
+#if NB_DISPLAYS
+    case WS_EVENT_DISPLAYS_CHANGED:
+        nbDisplaysChanged();
+        break;
+#endif
 
 #ifdef WS_SERVER_USABLE_AREA
     case WS_EVENT_USABLE_AREA:

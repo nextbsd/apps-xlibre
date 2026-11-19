@@ -321,6 +321,8 @@ nbCrossScreen(ScreenPtr pScreen, Bool entering)
 static void
 nbWarpCursor(DeviceIntPtr pDev, ScreenPtr pScreen, int x, int y)
 {
+    double px, py;
+
     miPointerWarpCursor(pDev, pScreen, x, y);
     if (nbConnection() == NULL ||
         !(nbScreenInfo.server_flags & WS_SERVER_POINTER_WARP) ||
@@ -328,8 +330,9 @@ nbWarpCursor(DeviceIntPtr pDev, ScreenPtr pScreen, int x, int y)
         (nbScreenInfo.pointer_frame == NULL && !nbScreenInfo.ws_grab))
         return;
     /* X's pixels, in WindowServer's points */
-    if (ws_warp_pointer(nbConnection(), 0, (double) x / nbScreenInfo.scale,
-                        (double) y / nbScreenInfo.scale) < 0)
+    px = (double) x / nbScreenInfo.scale + nbScreenInfo.origin_x;
+    py = (double) y / nbScreenInfo.scale + nbScreenInfo.origin_y;
+    if (ws_warp_pointer(nbConnection(), 0, px, py) < 0)
         nbWindowServerLost("warp");
 }
 

@@ -946,8 +946,8 @@ nbFrameSetByWindowServer(nbFrame *frame, const ws_rect_t *pr)
     if (!moved && !sized)
         return;
     /* In X pixels; what didn't change in points stays as X has it. */
-    rr.x = moved ? pr->x * s : frame->x;
-    rr.y = moved ? pr->y * s : frame->y;
+    rr.x = moved ? (pr->x - nbScreenInfo.origin_x) * s : frame->x;
+    rr.y = moved ? (pr->y - nbScreenInfo.origin_y) * s : frame->y;
     rr.width = sized ? pr->width * s : (int) frame->width;
     rr.height = sized ? pr->height * s : (int) frame->height;
     frame->x = r->x;
@@ -991,6 +991,31 @@ nbFrameSetByWindowServer(nbFrame *frame, const ws_rect_t *pr)
         now.height != pr->height) {
         if (ws_window_set_frame(nbConnection(), frame->wid, &now) < 0)
             nbWindowServerLost("frame");
+    }
+}
+
+/*
+ * The desktop's top-left corner moved (nbScreenChanged: a display was
+ * added left of or above the others, or the one that was there went
+ * away): X's 0, 0 is another WindowServer point now. WindowServer left
+ * the windows where they were, so X moves them to keep showing where
+ * they are: each frame goes to where it was, old_x, old_y being the
+ * corner it was measured from.
+ */
+void
+nbFramesOriginChanged(int old_x, int old_y)
+{
+    nbFrame *frame, *tmp;
+    ws_rect_t r;
+
+    xorg_list_for_each_entry_safe(frame, tmp, &nbScreenInfo.frames, link) {
+        r = nbPixelFrameToPoints(frame->x, frame->y, frame->width,
+                                 frame->height);
+        r.x += old_x - nbScreenInfo.origin_x;
+        r.y += old_y - nbScreenInfo.origin_y;
+        nbFrameSetByWindowServer(frame, &r);
+        if (nbConnection() == NULL)
+            return;
     }
 }
 

@@ -48,6 +48,18 @@
 #endif
 
 /*
+ * Several displays (WindowServer's WSProtocol.h "Displays"): servers that
+ * have them say so with WS_SERVER_DISPLAYS. Older headers have neither
+ * the flag nor ws_list_displays(), and Xnextbsd built with them has one
+ * output, as it does on a WindowServer without the flag.
+ */
+#ifdef WS_SERVER_DISPLAYS
+#define NB_DISPLAYS 1
+#else
+#define NB_DISPLAYS 0
+#endif
+
+/*
  * A WindowServer buffer of a frame. WindowServer reads it while it is
  * attached (and until it hands it back), so X only writes to one it
  * doesn't hold.
@@ -118,6 +130,10 @@ typedef struct nbScreen {
                                    scales it up, as XQuartz's apps are */
     Bool nogpu;                 /* -nogpu: fb in CPU memory, even with a GPU */
     Bool scale_dirty;           /* NB_SCALE_ATOM not on the root yet */
+    int origin_x, origin_y;     /* the WindowServer point at X's 0, 0: the
+                                   top-left corner of the rectangle around
+                                   every display (WS_SERVER_DISPLAYS), else
+                                   0, 0 */
     int mm_width, mm_height;
     unsigned int refresh_mhz;   /* WindowServer's refresh rate, 0 if unknown */
     char screen_name[32];       /* WindowServer's name for the screen */
@@ -157,6 +173,7 @@ void nbFrameSetByWindowServer(nbFrame *frame, const ws_rect_t *r);
 void nbFrameRestoreRequested(nbFrame *frame);
 void nbFramesUpdate(void);
 void nbFramesRescale(void);
+void nbFramesOriginChanged(int old_x, int old_y);
 nbFrame *nbFrameOfWindow(WindowPtr pWin);
 
 /*
@@ -228,14 +245,22 @@ nbPixelsToPointsUp(int px)
     return px >= 0 ? (px + s - 1) / s : -(-px / s);
 }
 
+/*
+ * With several displays, WindowServer's desktop needn't start at 0, 0 (a
+ * display left of or above the main one): X's 0, 0 is the top-left
+ * corner of the rectangle around them all, nbScreenInfo.origin_x and
+ * origin_y in points. Positions on the screen are converted with it;
+ * sizes and places inside a window aren't.
+ */
+
 /* A frame at x, y of w x h X pixels, in points. */
 static inline ws_rect_t
 nbPixelFrameToPoints(int x, int y, unsigned int w, unsigned int h)
 {
     ws_rect_t r;
 
-    r.x = nbPixelsToPointsDown(x);
-    r.y = nbPixelsToPointsDown(y);
+    r.x = nbPixelsToPointsDown(x) + nbScreenInfo.origin_x;
+    r.y = nbPixelsToPointsDown(y) + nbScreenInfo.origin_y;
     r.width = nbPixelsToPointsUp((int) w);
     r.height = nbPixelsToPointsUp((int) h);
     return r;
@@ -248,7 +273,10 @@ void nbScalePublish(void);
 
 /* nbRandR.c */
 Bool nbRandRInit(ScreenPtr pScreen);
+void nbScreenOrigin(const ws_screen_info_t *si, int *x, int *y);
 void nbScreenChanged(const ws_screen_info_t *si);
+void nbDisplaysChanged(void);
+void nbDisplaysPublish(void);
 void nbUsableAreaChanged(const ws_rect_t *usable);
 void nbUsableAreaPublish(void);
 

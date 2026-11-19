@@ -215,6 +215,15 @@
 - (BOOL) isWindowTypeDock:(XCBWindow*)aWindow;
 - (BOOL) readWorkareaForRootWindow:(XCBWindow*)rootWindow x:(int32_t*)outX y:(int32_t*)outY width:(uint32_t*)outWidth height:(uint32_t*)outHeight;
 
+// Several displays (RandR 1.5 monitors, one per WindowServer display):
+// the monitor aRect (root coordinates) is mostly on, or the whole root
+// window when there are no monitors; and the workarea on that monitor:
+// the part of _NET_WORKAREA on it, or the whole monitor when the workarea
+// (the main display's usable area) isn't on it. NO when there is no
+// _NET_WORKAREA; the outputs are then the monitor.
+- (XCBRect) monitorRectForRect:(XCBRect)aRect rootWindow:(XCBWindow*)rootWindow;
+- (BOOL) readWorkareaForRootWindow:(XCBWindow*)rootWindow nearRect:(XCBRect)aRect x:(int32_t*)outX y:(int32_t*)outY width:(uint32_t*)outWidth height:(uint32_t*)outHeight;
+
 // EWMH Client Window Properties (atoms management)
 - (void) setNetWmDesktopForWindow:(XCBWindow*)aWindow desktop:(uint32_t)desktopIndex;
 - (void) setNetWmAllowedActionsForWindow:(XCBWindow*)aWindow;
