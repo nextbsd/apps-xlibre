@@ -272,7 +272,15 @@ static BOOL pressedButtonHighlighted = NO;
                                                      highlighted:highlighted
                                                   documentEdited:edited];
         [cellButton setFrame:frame];
-        [[cellButton cell] drawWithFrame:frame inView:cellButton];
+        // The button's own drawing, not only its cell's: a theme may draw
+        // its title buttons in -drawRect: (NextBSD draws each style's
+        // buttons there; the cell alone gives NeXT's images).
+        [NSGraphicsContext saveGraphicsState];
+        NSAffineTransform *at = [NSAffineTransform transform];
+        [at translateXBy:NSMinX(frame) yBy:NSMinY(frame)];
+        [at concat];
+        [cellButton drawRect:[cellButton bounds]];
+        [NSGraphicsContext restoreGraphicsState];
     }
 
     [self strokeRoundedCornersOfRect:rect

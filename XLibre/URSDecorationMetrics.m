@@ -112,13 +112,22 @@ static NSUInteger decorationScale = 1;
     return NO;
 }
 
+// A theme that places zoom says where (an empty rect: no zoom, as in
+// NextBSD's NeXT style); otherwise zoom comes with a zoom image.
++ (BOOL)themeHasZoomButton
+{
+    GSTheme *theme = [GSTheme theme];
+    if ([theme respondsToSelector:@selector(zoomButtonFrameForBounds:)])
+        return !NSIsEmptyRect([theme zoomButtonFrameForBounds:NSMakeRect(0, 0, 400, 30)]);
+    return [self themeProvidesImageNamed:@"common_Zoom"];
+}
+
 + (NSArray *)buttonsForStyleMask:(NSUInteger)styleMask
 {
     NSMutableArray *buttons = [NSMutableArray array];
     if (styleMask & NSMiniaturizableWindowMask)
         [buttons addObject:@(NSWindowMiniaturizeButton)];
-    if ((styleMask & NSResizableWindowMask) &&
-        [self themeProvidesImageNamed:@"common_Zoom"])
+    if ((styleMask & NSResizableWindowMask) && [self themeHasZoomButton])
         [buttons addObject:@(NSWindowZoomButton)];
     if (styleMask & NSClosableWindowMask)
         [buttons addObject:@(NSWindowCloseButton)];
